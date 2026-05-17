@@ -73,3 +73,10 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Claude Code local settings
+.claude/
+
+# Firebase config — contains project API key, must be downloaded per developer
+android/app/google-services.json
+ios/GoogleService-Info.plist

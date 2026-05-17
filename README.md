@@ -1,4 +1,14 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+YoungmanApp — React Native WebView shell for [youngman-biz.com](https://youngman-biz.com), with a native bridge for auth (incl. Google Sign-In), FCM push token, external link routing, and deep linking. Bootstrapped from [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+
+# Firebase setup (required before first build)
+
+`android/app/google-services.json` is git-ignored. Before building Android you must obtain it:
+
+1. Go to [Firebase Console](https://console.firebase.google.com/) → project `youngmanapp-e8a9d` → Project settings → Your apps → Android app (`com.youngmanapp`).
+2. Click "google-services.json" to download.
+3. Place the file at `android/app/google-services.json`.
+
+If you are using a different keystore (debug or release), register its SHA-1 fingerprint in the same Firebase Console page so Google Sign-In is authorized for that build.
 
 # Getting Started
 

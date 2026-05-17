@@ -1,3 +1,5 @@
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React, { useCallback, useRef, useState } from 'react';
 import { Platform, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -8,6 +10,8 @@ import type {
   WebViewMessageEvent,
   WebViewNavigation,
 } from 'react-native-webview/lib/WebViewTypes';
+
+import type { RootStackParamList } from '../../navigation/types';
 
 import { USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/env';
 import { buildInjectedScript } from './bridge/injectedScript';
@@ -22,6 +26,8 @@ import { useHardwareBack } from './hooks/useHardwareBack';
 import { useNetworkStatus } from './hooks/useNetworkStatus';
 
 export const WebViewHost: React.FC = () => {
+  const navigation =
+    useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const webViewRef = useRef<WebView | null>(null);
   const authRef = useRef<AuthLoginPayload | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -51,15 +57,20 @@ export const WebViewHost: React.FC = () => {
     }
   }, []);
 
+  const onOpenOnboarding = useCallback(() => {
+    navigation.navigate('OnboardingDemo');
+  }, [navigation]);
+
   const onMessage = useCallback(
     (event: WebViewMessageEvent) => {
       void handleBridgeMessage(event.nativeEvent.data, {
         injectScript: js => webViewRef.current?.injectJavaScript(js),
         onAuthLogin,
         onAuthLogout,
+        onOpenOnboarding,
       });
     },
-    [onAuthLogin, onAuthLogout],
+    [onAuthLogin, onAuthLogout, onOpenOnboarding],
   );
 
   const onLoadStart = useCallback(() => {

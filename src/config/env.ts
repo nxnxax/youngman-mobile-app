@@ -1,4 +1,5 @@
 export const WEB_BASE_URL = 'https://youngman-biz.com';
+export const API_BASE_URL = 'https://youngman-biz.com';
 
 export const ALLOWED_HOSTS: ReadonlyArray<string> = [
   'youngman-biz.com',

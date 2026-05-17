@@ -8,9 +8,14 @@ import {
 
 import { APP_VERSION } from '../../../config/env';
 import {
+  clearSession,
+  setSession,
+} from '../../../services/auth/session';
+import {
   runGoogleSignIn,
   runGoogleSignOut,
 } from '../../auth/googleSignIn';
+import { scanForCallRecordings } from '../../callRecording/scanner/recordingScanner';
 import { callWebBridge, dispatchWebBridge } from './bridgeCall';
 
 export interface AuthLoginPayload {
@@ -32,6 +37,7 @@ export interface BridgeContext {
   injectScript: (js: string) => void;
   onAuthLogin: (auth: AuthLoginPayload) => void;
   onAuthLogout: () => void;
+  onOpenOnboarding: () => void;
 }
 
 interface RawBridgeMessage {
@@ -102,11 +108,13 @@ export async function handleBridgeMessage(
     case 'auth.login': {
       const auth = toAuthPayload(msg.payload);
       if (auth) {
+        setSession(auth);
         ctx.onAuthLogin(auth);
       }
       return;
     }
     case 'auth.logout': {
+      clearSession();
       ctx.onAuthLogout();
       void runGoogleSignOut();
       return;
@@ -158,6 +166,49 @@ export async function handleBridgeMessage(
       if (__DEV__) {
         console.log('[Bridge] debug.ping', msg.payload);
       }
+      return;
+    }
+    case 'demo.openOnboarding': {
+      ctx.onOpenOnboarding();
+      return;
+    }
+    case 'debug.scan': {
+      const opts = (msg.payload as { limit?: number; maxAgeDays?: number } | undefined) ?? {};
+      const result = await scanForCallRecordings(opts);
+      if (__DEV__) {
+        console.log(
+          '[Scan]',
+          'status=', result.status,
+          'returned=', result.recordings.length,
+          'totalFound=', result.totalFound,
+          result.error ? `err=${result.error}` : '',
+        );
+        result.recordings.forEach(r => {
+          console.log(
+            '[Scan]',
+            r.classification.source,
+            r.classification.confidence,
+            r.displayName,
+            `path="${r.relativePath}"`,
+            `${Math.round(r.duration / 1000)}s`,
+          );
+        });
+      }
+      ctx.injectScript(
+        dispatchWebBridge('onDebugScanResult', {
+          status: result.status,
+          count: result.recordings.length,
+          totalFound: result.totalFound,
+          error: result.error ?? null,
+          sample: result.recordings.map(r => ({
+            displayName: r.displayName,
+            relativePath: r.relativePath,
+            durationSec: Math.round(r.duration / 1000),
+            source: r.classification.source,
+            confidence: r.classification.confidence,
+          })),
+        }),
+      );
       return;
     }
     case 'log': {

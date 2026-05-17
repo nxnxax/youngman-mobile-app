@@ -1,8 +1,15 @@
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import React from 'react';
-import { StatusBar, StyleSheet, View, useColorScheme } from 'react-native';
+import { StatusBar, useColorScheme } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import { OnboardingDemoScreen } from './src/features/callRecording/screens/OnboardingDemoScreen';
+import { SummaryReviewScreen } from './src/features/callRecording/screens/SummaryReviewScreen';
+import type { RootStackParamList } from './src/navigation/types';
 import { WebViewHost } from './src/features/webview/WebViewHost';
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
@@ -13,18 +20,23 @@ function App(): React.JSX.Element {
         barStyle={isDarkMode ? 'light-content' : 'dark-content'}
         backgroundColor="#FFFFFF"
       />
-      <View style={styles.container}>
-        <WebViewHost />
-      </View>
+      <NavigationContainer>
+        <Stack.Navigator screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="WebView" component={WebViewHost} />
+          <Stack.Screen
+            name="OnboardingDemo"
+            component={OnboardingDemoScreen}
+            options={{ presentation: 'modal' }}
+          />
+          <Stack.Screen
+            name="SummaryReview"
+            component={SummaryReviewScreen}
+            options={{ presentation: 'modal' }}
+          />
+        </Stack.Navigator>
+      </NavigationContainer>
     </SafeAreaProvider>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-  },
-});
 
 export default App;

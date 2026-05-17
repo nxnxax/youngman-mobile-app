@@ -13,10 +13,13 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import com.youngmanapp.R
 import com.youngmanapp.callrecording.CallRecordingClassifier
 import com.youngmanapp.callrecording.RecordingState
+import com.youngmanapp.logging.ErrorLog
+import com.youngmanapp.overlay.OverlayService
 
 /**
  * Short-lived foreground service started by [CallStateReceiver] when a call
@@ -63,13 +66,18 @@ class PostCallScanService : Service() {
             if (found != null) {
               Log.d(TAG, "found new call recording: ${found.displayName} @ ${found.relativePath}")
               RecordingState.setBaseline(this@PostCallScanService, found.dateAdded)
-              notifier.showRecordingFound(found)
+              if (canDrawOverlay()) {
+                OverlayService.start(this@PostCallScanService, found)
+              } else {
+                notifier.showRecordingFound(found)
+              }
               stopSelfSafely()
               return
             }
             Log.d(TAG, "poll: no new file yet (elapsed=${System.currentTimeMillis() - startedAt}ms)")
           } catch (t: Throwable) {
             Log.w(TAG, "poll exception", t)
+            ErrorLog.append(this@PostCallScanService, TAG, "poll exception", t)
           }
           val elapsed = System.currentTimeMillis() - startedAt
           if (elapsed >= deadlineMs) {
@@ -172,6 +180,9 @@ class PostCallScanService : Service() {
     )
     return null
   }
+
+  private fun canDrawOverlay(): Boolean =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(this) else true
 
   private fun buildOngoingNotification(): Notification {
     ensureChannel(this, CHANNEL_ID_ONGOING, "통화녹음 감지", NotificationManager.IMPORTANCE_LOW)

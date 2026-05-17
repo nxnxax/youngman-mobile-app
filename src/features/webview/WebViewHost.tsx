@@ -1,7 +1,7 @@
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import React, { useCallback, useRef, useState } from 'react';
-import { Platform, StyleSheet, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState, Platform, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import type {
@@ -14,6 +14,8 @@ import type {
 import type { RootStackParamList } from '../../navigation/types';
 
 import { USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/env';
+import { isLoggedIn } from '../../services/auth/session';
+import { syncLedgerGroupsToNative } from '../callRecording/services/ledgerGroupsSync';
 import { buildInjectedScript } from './bridge/injectedScript';
 import type { AuthLoginPayload } from './bridge/messageHandler';
 import { handleBridgeMessage } from './bridge/messageHandler';
@@ -56,6 +58,18 @@ export const WebViewHost: React.FC = () => {
 
   useHardwareBack(webViewRef, canGoBack);
   useDeepLink(webViewRef, webViewReady, onNativeRoute);
+
+  // Refresh native ledger-groups cache whenever the app returns to foreground —
+  // covers the case where the user adds/renames a group inside the WebView and
+  // then ends a call. auth.login also triggers a sync; this is the safety net.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', state => {
+      if (state === 'active' && isLoggedIn()) {
+        void syncLedgerGroupsToNative();
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   const onNavigationStateChange = useCallback((nav: WebViewNavigation) => {
     setCanGoBack(nav.canGoBack);

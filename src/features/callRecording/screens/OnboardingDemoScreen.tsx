@@ -18,6 +18,7 @@ import { lookupContactName } from '../../../services/contacts/lookupContact';
 import { uuidv4 } from '../../../shared/uuid';
 import { processRecording } from '../api/processRecording';
 import { uploadRecording } from '../api/uploadRecording';
+import { BackgroundPermissionBanner } from '../components/BackgroundPermissionBanner';
 import { extractPhoneNumber } from '../scanner/heuristics';
 import type { FoundCallRecording } from '../scanner/heuristics';
 import { scanForCallRecordings } from '../scanner/recordingScanner';
@@ -153,6 +154,8 @@ export const OnboardingDemoScreen: React.FC = () => {
       </View>
 
       <View style={styles.body}>
+        <BackgroundPermissionBanner />
+
         <Text style={styles.title}>AI 통화 요약 체험</Text>
         <Text style={styles.subtitle}>
           가장 최근 통화 1건을 AI가 요약해서{'\n'}

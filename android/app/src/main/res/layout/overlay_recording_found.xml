@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingHorizontal="32dp">
+
+    <androidx.cardview.widget.CardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:foreground="@drawable/glass_card_stroke"
+        app:cardCornerRadius="26dp"
+        app:cardElevation="24dp"
+        app:cardBackgroundColor="#D9FFFFFF"
+        app:contentPadding="0dp">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingHorizontal="6dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="0dp">
+
+                <TextView
+                    android:id="@+id/overlay_title"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:gravity="center_vertical"
+                    android:drawableEnd="@drawable/ic_heart_red"
+                    android:drawablePadding="6dp"
+                    android:text="영맨 고객관리 비서"
+                    android:textColor="#111111"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="-0.01" />
+
+                <TextView
+                    android:id="@+id/overlay_subtitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:layout_marginTop="2dp"
+                    android:textColor="#666666"
+                    android:textSize="12sp"
+                    android:letterSpacing="-0.01" />
+
+                <LinearLayout
+                    android:id="@+id/overlay_group_picker"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="vertical">
+
+                    <LinearLayout
+                        android:id="@+id/overlay_group_chip"
+                        android:layout_width="match_parent"
+                        android:layout_height="46dp"
+                        android:layout_marginHorizontal="6dp"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:background="@drawable/chip_dropdown_premium"
+                        android:paddingHorizontal="16dp"
+                        android:clickable="true"
+                        android:focusable="true">
+
+                        <ImageView
+                            android:layout_width="18dp"
+                            android:layout_height="18dp"
+                            android:src="@drawable/ic_folder_filled"
+                            android:contentDescription="group"
+                            android:alpha="0.95" />
+
+                        <TextView
+                            android:id="@+id/overlay_group_chip_label"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:layout_marginStart="10dp"
+                            android:textColor="#FFFFFF"
+                            android:textSize="14sp"
+                            android:textStyle="bold"
+                            android:letterSpacing="0.01"
+                            android:singleLine="true"
+                            android:ellipsize="end" />
+
+                        <ImageView
+                            android:layout_width="14dp"
+                            android:layout_height="14dp"
+                            android:src="@drawable/ic_chevron_down"
+                            android:contentDescription="open"
+                            android:alpha="0.85" />
+                    </LinearLayout>
+
+                    <ScrollView
+                        android:id="@+id/overlay_group_list_scroll"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:maxHeight="180dp"
+                        android:scrollbars="none"
+                        android:overScrollMode="never"
+                        android:visibility="gone">
+
+                        <LinearLayout
+                            android:id="@+id/overlay_group_list"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:background="@drawable/group_list_bg" />
+                    </ScrollView>
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:orientation="horizontal"
+                    android:weightSum="3">
+
+                    <TextView
+                        android:id="@+id/overlay_btn_cancel"
+                        android:layout_width="0dp"
+                        android:layout_height="38dp"
+                        android:layout_weight="1"
+                        android:layout_marginEnd="6dp"
+                        android:background="@drawable/overlay_btn_neutral_bg"
+                        android:gravity="center"
+                        android:text="취소"
+                        android:textColor="#888888"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:id="@+id/overlay_btn_review"
+                        android:layout_width="0dp"
+                        android:layout_height="38dp"
+                        android:layout_weight="1"
+                        android:layout_marginHorizontal="3dp"
+                        android:background="@drawable/overlay_btn_neutral_bg"
+                        android:gravity="center"
+                        android:text="요약보기"
+                        android:textColor="#0066FF"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:id="@+id/overlay_btn_submit"
+                        android:layout_width="0dp"
+                        android:layout_height="38dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="6dp"
+                        android:background="@drawable/overlay_btn_submit_bg"
+                        android:gravity="center"
+                        android:text="양식에 전송"
+                        android:textColor="#FFFFFF"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Top specular highlight — bright at top, fading down quickly. -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="26dp"
+                android:layout_gravity="top"
+                android:background="@drawable/glass_highlight"
+                android:clickable="false"
+                android:focusable="false" />
+
+        </FrameLayout>
+    </androidx.cardview.widget.CardView>
+</FrameLayout>

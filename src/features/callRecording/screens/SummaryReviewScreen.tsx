@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -19,8 +20,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { RootStackParamList } from '../../../navigation/types';
-import { updateCustomerLog } from '../api/records';
-import type { CustomerLogPatch, CustomerLogRow } from '../api/types';
+import { sendCustomerLogToGroup } from '../api/records';
+import type {
+  CustomerLogPatch,
+  CustomerLogRow,
+  LedgerGroup,
+} from '../api/types';
 import { ApiError } from '../../../services/api/client';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'SummaryReview'>;
@@ -72,9 +77,19 @@ export const SummaryReviewScreen: React.FC = () => {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Route>();
   const initialRow = route.params.customerLog;
+  const availableGroups: ReadonlyArray<LedgerGroup> =
+    route.params.availableGroups ?? [];
   const original = useMemo(() => rowToFormValues(initialRow), [initialRow]);
   const [values, setValues] = useState<Record<string, string>>(original);
   const [saving, setSaving] = useState(false);
+  const [groupId, setGroupId] = useState<string | null>(() => {
+    if (route.params.groupId !== undefined) {
+      return route.params.groupId;
+    }
+    const main = (route.params.availableGroups ?? []).find(g => g.is_main);
+    return main?.id ?? null;
+  });
+  const [groupPickerOpen, setGroupPickerOpen] = useState(false);
 
   useEffect(() => {
     if (__DEV__) {
@@ -90,14 +105,23 @@ export const SummaryReviewScreen: React.FC = () => {
     setValues(v => ({ ...v, [key]: val }));
   }, []);
 
-  const onSave = useCallback(async () => {
-    if (!dirty) {
-      navigation.popToTop();
-      return;
+  const selectedGroupTitle = useMemo(() => {
+    if (!groupId) {
+      return '기본 그룹 (자동 생성)';
     }
+    const hit = availableGroups.find(g => g.id === groupId);
+    return hit?.title ?? '선택된 그룹';
+  }, [availableGroups, groupId]);
+
+  const onSave = useCallback(async () => {
     setSaving(true);
     try {
-      await updateCustomerLog(initialRow.id, diff(original, values));
+      const override = diff(original, values);
+      await sendCustomerLogToGroup({
+        id: initialRow.id,
+        group_id: groupId,
+        override: Object.keys(override).length > 0 ? override : undefined,
+      });
       Alert.alert('저장됨', '고객관리대장에 반영됐어요.', [
         { text: '확인', onPress: () => navigation.popToTop() },
       ]);
@@ -107,7 +131,7 @@ export const SummaryReviewScreen: React.FC = () => {
     } finally {
       setSaving(false);
     }
-  }, [dirty, initialRow.id, navigation, original, values]);
+  }, [groupId, initialRow.id, navigation, original, values]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -116,9 +140,7 @@ export const SummaryReviewScreen: React.FC = () => {
           <Text style={styles.close}>닫기</Text>
         </Pressable>
         <Pressable onPress={onSave} disabled={saving} hitSlop={12}>
-          <Text style={[styles.save, !dirty && styles.saveInactive]}>
-            {dirty ? '저장' : '완료'}
-          </Text>
+          <Text style={styles.save}>양식 전송</Text>
         </Pressable>
       </View>
 
@@ -144,6 +166,17 @@ export const SummaryReviewScreen: React.FC = () => {
           <Text style={styles.metaText}>모델 {initialRow.ai_model}</Text>
         </View>
 
+        <Pressable
+          style={styles.groupChip}
+          onPress={() => setGroupPickerOpen(true)}
+        >
+          <Text style={styles.groupChipLabel}>전송 그룹</Text>
+          <Text style={styles.groupChipValue} numberOfLines={1}>
+            {selectedGroupTitle}
+          </Text>
+          <Text style={styles.groupChipChevron}>▾</Text>
+        </Pressable>
+
         {FIELDS.map(f => (
           <View key={f.key} style={styles.fieldBlock}>
             <Text style={styles.fieldLabel}>{f.label}</Text>
@@ -167,6 +200,62 @@ export const SummaryReviewScreen: React.FC = () => {
         )}
       </ScrollView>
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={groupPickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setGroupPickerOpen(false)}
+      >
+        <Pressable
+          style={styles.sheetBackdrop}
+          onPress={() => setGroupPickerOpen(false)}
+        >
+          <Pressable style={styles.sheet} onPress={() => {}}>
+            <Text style={styles.sheetTitle}>전송 그룹 선택</Text>
+            <Text style={styles.sheetSubtitle}>
+              고객관리대장의 어느 그룹에 기록할까요?
+            </Text>
+            <ScrollView style={styles.sheetList} bounces={false}>
+              <Pressable
+                style={[
+                  styles.sheetItem,
+                  groupId === null && styles.sheetItemActive,
+                ]}
+                onPress={() => {
+                  setGroupId(null);
+                  setGroupPickerOpen(false);
+                }}
+              >
+                <Text style={styles.sheetItemText}>기본 그룹 (자동 생성)</Text>
+                {groupId === null && (
+                  <Text style={styles.sheetItemCheck}>✓</Text>
+                )}
+              </Pressable>
+              {availableGroups.map(g => (
+                <Pressable
+                  key={g.id}
+                  style={[
+                    styles.sheetItem,
+                    groupId === g.id && styles.sheetItemActive,
+                  ]}
+                  onPress={() => {
+                    setGroupId(g.id);
+                    setGroupPickerOpen(false);
+                  }}
+                >
+                  <Text style={styles.sheetItemText} numberOfLines={1}>
+                    {g.title}
+                  </Text>
+                  {groupId === g.id && (
+                    <Text style={styles.sheetItemCheck}>✓</Text>
+                  )}
+                </Pressable>
+              ))}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -216,4 +305,51 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   savingText: { color: '#666' },
+  groupChip: {
+    marginTop: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#FFFFFF',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  groupChipLabel: { fontSize: 13, color: '#666' },
+  groupChipValue: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0066FF',
+  },
+  groupChipChevron: { fontSize: 14, color: '#999' },
+  sheetBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'flex-end',
+  },
+  sheet: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 32,
+    maxHeight: '70%',
+  },
+  sheetTitle: { fontSize: 18, fontWeight: '700', color: '#111' },
+  sheetSubtitle: { marginTop: 4, fontSize: 13, color: '#666' },
+  sheetList: { marginTop: 16 },
+  sheetItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+  },
+  sheetItemActive: { backgroundColor: '#EFF4FF' },
+  sheetItemText: { flex: 1, fontSize: 15, color: '#111' },
+  sheetItemCheck: { fontSize: 16, color: '#0066FF', fontWeight: '700' },
 });

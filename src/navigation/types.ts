@@ -1,4 +1,7 @@
-import type { CustomerLogRow } from '../features/callRecording/api/types';
+import type {
+  CustomerLogRow,
+  LedgerGroup,
+} from '../features/callRecording/api/types';
 
 export interface ConfirmRecordingParams {
   uri: string;
@@ -8,9 +11,17 @@ export interface ConfirmRecordingParams {
   mimeType: string;
 }
 
+export interface SummaryReviewParams {
+  customerLog: CustomerLogRow;
+  /** Group selected upstream (glass overlay / ConfirmRecording). null = auto-default. */
+  groupId?: string | null;
+  /** Cached groups so the picker on this screen does not need to refetch. */
+  availableGroups?: ReadonlyArray<LedgerGroup>;
+}
+
 export type RootStackParamList = {
   WebView: undefined;
   OnboardingDemo: undefined;
   ConfirmRecording: ConfirmRecordingParams;
-  SummaryReview: { customerLog: CustomerLogRow };
+  SummaryReview: SummaryReviewParams;
 };

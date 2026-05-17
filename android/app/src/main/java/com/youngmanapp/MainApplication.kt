@@ -8,6 +8,10 @@ import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.youngmanapp.callrecording.RecordingScannerPackage
 import com.youngmanapp.contacts.ContactsPackage
+import com.youngmanapp.ledger.LedgerGroupsPackage
+import com.youngmanapp.logging.ErrorLogPackage
+import com.youngmanapp.overlay.SuccessOverlayPackage
+import com.youngmanapp.system.BackgroundRestrictionPackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -18,6 +22,10 @@ class MainApplication : Application(), ReactApplication {
         PackageList(this).packages.apply {
           add(RecordingScannerPackage())
           add(ContactsPackage())
+          add(BackgroundRestrictionPackage())
+          add(ErrorLogPackage())
+          add(LedgerGroupsPackage())
+          add(SuccessOverlayPackage())
         },
     )
   }

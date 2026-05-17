@@ -20,6 +20,8 @@ import { isLoggedIn } from '../../../services/auth/session';
 import { lookupContactName } from '../../../services/contacts/lookupContact';
 import { uuidv4 } from '../../../shared/uuid';
 import { processRecording } from '../api/processRecording';
+import { fetchLedgerGroups } from '../api/records';
+import type { LedgerGroup } from '../api/types';
 import { uploadRecording } from '../api/uploadRecording';
 import { extractPhoneNumber } from '../scanner/heuristics';
 
@@ -93,9 +95,21 @@ export const ConfirmRecordingScreen: React.FC = () => {
         customer_name_hint: contactName,
       });
 
+      let groups: ReadonlyArray<LedgerGroup> = [];
+      try {
+        const res = await fetchLedgerGroups('customer');
+        groups = res.groups;
+      } catch (err) {
+        if (__DEV__) {
+          console.log('[ConfirmRecording] fetchLedgerGroups failed', err);
+        }
+      }
+
       setStage('idle');
+      // Omit groupId so SummaryReview can default to the user's main group.
       navigation.replace('SummaryReview', {
         customerLog: processed.customer_log,
+        availableGroups: groups,
       });
     } catch (e) {
       setStage('idle');
@@ -139,7 +153,7 @@ export const ConfirmRecordingScreen: React.FC = () => {
           </Text>
           {stage === 'idle' ? (
             <Pressable style={styles.primaryButton} onPress={onProcess}>
-              <Text style={styles.primaryButtonText}>기록하기</Text>
+              <Text style={styles.primaryButtonText}>요약하기</Text>
             </Pressable>
           ) : (
             <View style={styles.progressBlock}>

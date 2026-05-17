@@ -57,3 +57,27 @@ export type CustomerLogPatch = Partial<
     | 'agent_memo'
   >
 >;
+
+export interface LedgerGroup {
+  id: string;
+  page_type: 'customer' | string;
+  title: string;
+  position: number;
+  /** User-designated "main" group. Modal picker defaults to this one. */
+  is_main?: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LedgerGroupsResponse {
+  status: 'ok';
+  groups: ReadonlyArray<LedgerGroup>;
+}
+
+export interface SendToGroupResponse {
+  status: 'ok';
+  group_id: string;
+  group_title: string;
+  ledger_record_id: string;
+  created_group: boolean;
+}

@@ -1,10 +1,4 @@
 import { Linking, Platform } from 'react-native';
-import {
-  AuthorizationStatus,
-  getMessaging,
-  getToken,
-  requestPermission,
-} from '@react-native-firebase/messaging';
 
 import { APP_VERSION } from '../../../config/env';
 import {
@@ -21,6 +15,19 @@ import {
   simulateCallEnd,
 } from '../../callRecording/scanner/recordingScanner';
 import { ApiError } from '../../../services/api/client';
+import { getFcmToken } from '../../../services/fcm/getFcmToken';
+import {
+  registerFcmTokenWithServer,
+  unregisterFcmTokenWithServer,
+} from '../../../services/fcm/registerFcmToken';
+import {
+  clearErrorLog,
+  readErrorLog,
+} from '../../../services/logger/errorLog';
+import {
+  clearLedgerGroupsCache,
+  syncLedgerGroupsToNative,
+} from '../../callRecording/services/ledgerGroupsSync';
 import { callWebBridge, dispatchWebBridge } from './bridgeCall';
 
 export interface AuthLoginPayload {
@@ -76,25 +83,6 @@ export function buildAppInfo(): AppInfo {
   };
 }
 
-async function fetchFcmToken(): Promise<string | null> {
-  try {
-    const m = getMessaging();
-    const auth = await requestPermission(m);
-    const granted =
-      auth === AuthorizationStatus.AUTHORIZED ||
-      auth === AuthorizationStatus.PROVISIONAL;
-    if (!granted) {
-      return null;
-    }
-    return await getToken(m);
-  } catch (e) {
-    if (__DEV__) {
-      console.warn('[FCM] token retrieval failed', e);
-    }
-    return null;
-  }
-}
-
 export async function handleBridgeMessage(
   raw: string,
   ctx: BridgeContext,
@@ -115,13 +103,23 @@ export async function handleBridgeMessage(
       if (auth) {
         setSession(auth);
         ctx.onAuthLogin(auth);
+        // Fire-and-forget: populate the native ledger-groups cache so the
+        // post-call glass overlay can render the chip selector immediately.
+        void syncLedgerGroupsToNative();
+        // Register the FCM token with the backend so server-driven push
+        // (async processing, M2/M3) can target this device.
+        void registerFcmTokenWithServer();
       }
       return;
     }
     case 'auth.logout': {
-      clearSession();
-      ctx.onAuthLogout();
-      void runGoogleSignOut();
+      // Unregister BEFORE clearing the session — apiPost needs the JWT.
+      void unregisterFcmTokenWithServer().finally(() => {
+        clearSession();
+        ctx.onAuthLogout();
+        void runGoogleSignOut();
+        void clearLedgerGroupsCache();
+      });
       return;
     }
     case 'auth.googleSignIn.request': {
@@ -165,7 +163,7 @@ export async function handleBridgeMessage(
       return;
     }
     case 'app.fcm.request': {
-      const token = await fetchFcmToken();
+      const token = await getFcmToken();
       ctx.injectScript(callWebBridge('onFcmToken', token));
       return;
     }
@@ -187,6 +185,32 @@ export async function handleBridgeMessage(
       await simulateCallEnd();
       if (__DEV__) {
         console.log('[Bridge] simulateCallEnd dispatched');
+      }
+      return;
+    }
+    case 'debug.dumpErrorLog': {
+      const log = await readErrorLog();
+      if (__DEV__) {
+        console.log('--- ErrorLog (start) ---');
+        // Split into 3KB chunks so each log line fits in one logcat entry
+        const chunkSize = 3000;
+        for (let i = 0; i < log.length; i += chunkSize) {
+          console.log(log.slice(i, i + chunkSize));
+        }
+        console.log('--- ErrorLog (end, bytes=' + log.length + ') ---');
+      }
+      ctx.injectScript(
+        dispatchWebBridge('onDebugErrorLog', {
+          bytes: log.length,
+          content: log,
+        }),
+      );
+      return;
+    }
+    case 'debug.clearErrorLog': {
+      await clearErrorLog();
+      if (__DEV__) {
+        console.log('[Bridge] errorLog cleared');
       }
       return;
     }

@@ -12,6 +12,7 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.module.annotations.ReactModule
+import com.youngmanapp.telephony.PostCallScanService
 
 /**
  * Native module exposing a single method to JS: scanAudio().
@@ -39,6 +40,7 @@ class RecordingScannerModule(reactContext: ReactApplicationContext) :
 
       val projection = buildProjection()
       val result: WritableArray = Arguments.createArray()
+      var maxDateAdded = 0L
 
       reactApplicationContext.contentResolver
           .query(collection, projection, null, null, "${MediaStore.Audio.Media.DATE_ADDED} DESC")
@@ -57,6 +59,8 @@ class RecordingScannerModule(reactContext: ReactApplicationContext) :
             while (cursor.moveToNext()) {
               val id = cursor.getLong(idCol)
               val uri = ContentUris.withAppendedId(collection, id)
+              val dateAdded = cursor.getLong(dateCol)
+              if (dateAdded > maxDateAdded) maxDateAdded = dateAdded
               val map = Arguments.createMap()
               map.putString("id", id.toString())
               map.putString("uri", uri.toString())
@@ -64,13 +68,19 @@ class RecordingScannerModule(reactContext: ReactApplicationContext) :
               map.putString(
                   "relativePath",
                   if (pathCol >= 0) cursor.getString(pathCol) ?: "" else "")
-              map.putDouble("dateAdded", cursor.getLong(dateCol).toDouble())
+              map.putDouble("dateAdded", dateAdded.toDouble())
               map.putDouble("duration", cursor.getLong(durCol).toDouble())
               map.putString("mimeType", cursor.getString(mimeCol) ?: "")
               map.putDouble("size", cursor.getLong(sizeCol).toDouble())
               result.pushMap(map)
             }
           }
+
+      // Advance the baseline so the post-call service knows what the user has
+      // already had a chance to see. Files newer than this are "fresh".
+      if (maxDateAdded > 0L) {
+        RecordingState.setBaseline(reactApplicationContext, maxDateAdded)
+      }
 
       promise.resolve(result)
     } catch (e: SecurityException) {
@@ -94,6 +104,23 @@ class RecordingScannerModule(reactContext: ReactApplicationContext) :
       base += MediaStore.Audio.Media.RELATIVE_PATH
     }
     return base.toTypedArray()
+  }
+
+  /**
+   * Debug-only helper: lowers the baseline so the next post-call scan treats
+   * the newest existing recording as "new", then kicks off PostCallScanService.
+   *
+   * Use from JS via: window.YoungmanBridge.postToApp('debug.simulateCallEnd', {})
+   */
+  @ReactMethod
+  fun simulateCallEnd(promise: Promise) {
+    try {
+      RecordingState.setBaseline(reactApplicationContext, 1L)
+      PostCallScanService.start(reactApplicationContext)
+      promise.resolve(null)
+    } catch (e: Exception) {
+      promise.reject("SIMULATE_FAILED", e.message, e)
+    }
   }
 
   companion object {

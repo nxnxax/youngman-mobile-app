@@ -3,10 +3,12 @@ import type {
   NativeStackNavigationProp,
   RouteProp,
 } from '@react-navigation/native-stack';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -74,6 +76,12 @@ export const SummaryReviewScreen: React.FC = () => {
   const [values, setValues] = useState<Record<string, string>>(original);
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    if (__DEV__) {
+      console.log('[SummaryReview] customer_log.id', initialRow.id);
+    }
+  }, [initialRow.id]);
+
   const dirty = useMemo(() => {
     return Object.keys(diff(original, values)).length > 0;
   }, [original, values]);
@@ -114,7 +122,16 @@ export const SummaryReviewScreen: React.FC = () => {
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior="padding"
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
+      >
+      <ScrollView
+        contentContainerStyle={styles.body}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
+      >
         <Text style={styles.title}>AI 요약 결과</Text>
         <Text style={styles.subtitle}>
           AI가 정리한 내용이에요. 필요하면 수정하고 [저장] 누르세요.
@@ -149,12 +166,14 @@ export const SummaryReviewScreen: React.FC = () => {
           </View>
         )}
       </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
+  flex: { flex: 1 },
   headerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -166,7 +185,7 @@ const styles = StyleSheet.create({
   close: { color: '#666', fontSize: 15 },
   save: { color: '#0066FF', fontSize: 15, fontWeight: '700' },
   saveInactive: { color: '#999' },
-  body: { padding: 24 },
+  body: { padding: 24, paddingBottom: 64 },
   title: { fontSize: 22, fontWeight: '700', color: '#111' },
   subtitle: { fontSize: 14, color: '#555', marginTop: 6, lineHeight: 20 },
   metaCard: {

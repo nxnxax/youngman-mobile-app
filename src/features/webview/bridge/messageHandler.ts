@@ -15,7 +15,12 @@ import {
   runGoogleSignIn,
   runGoogleSignOut,
 } from '../../auth/googleSignIn';
-import { scanForCallRecordings } from '../../callRecording/scanner/recordingScanner';
+import { deleteCustomerLog } from '../../callRecording/api/records';
+import {
+  scanForCallRecordings,
+  simulateCallEnd,
+} from '../../callRecording/scanner/recordingScanner';
+import { ApiError } from '../../../services/api/client';
 import { callWebBridge, dispatchWebBridge } from './bridgeCall';
 
 export interface AuthLoginPayload {
@@ -121,6 +126,12 @@ export async function handleBridgeMessage(
     }
     case 'auth.googleSignIn.request': {
       const nonce = (msg.payload as { nonce?: string } | undefined)?.nonce;
+      if (__DEV__) {
+        console.log(
+          '[GoogleSignIn] payload.nonce',
+          nonce ? `present (len=${nonce.length})` : 'MISSING',
+        );
+      }
       const result = await runGoogleSignIn(nonce);
       ctx.injectScript(
         dispatchWebBridge('onGoogleSignInResult', result),
@@ -170,6 +181,41 @@ export async function handleBridgeMessage(
     }
     case 'demo.openOnboarding': {
       ctx.onOpenOnboarding();
+      return;
+    }
+    case 'debug.simulateCallEnd': {
+      await simulateCallEnd();
+      if (__DEV__) {
+        console.log('[Bridge] simulateCallEnd dispatched');
+      }
+      return;
+    }
+    case 'debug.deleteCustomerLog': {
+      const id = (msg.payload as { id?: string } | undefined)?.id;
+      if (!id) {
+        if (__DEV__) console.log('[Bridge] deleteCustomerLog: missing id');
+        return;
+      }
+      try {
+        await deleteCustomerLog(id);
+        if (__DEV__) console.log('[Bridge] deleted customer_log', id);
+        ctx.injectScript(
+          dispatchWebBridge('onDebugDeleteResult', { status: 'ok', id }),
+        );
+      } catch (e) {
+        const code = e instanceof ApiError ? e.code : 'unknown';
+        const message =
+          e instanceof ApiError ? e.message : String(e);
+        if (__DEV__) console.log('[Bridge] delete failed', code, message);
+        ctx.injectScript(
+          dispatchWebBridge('onDebugDeleteResult', {
+            status: 'error',
+            id,
+            code,
+            message,
+          }),
+        );
+      }
       return;
     }
     case 'debug.scan': {

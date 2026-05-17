@@ -21,6 +21,7 @@ import { ErrorView } from './components/ErrorView';
 import { LoadingOverlay } from './components/LoadingOverlay';
 import { OfflineView } from './components/OfflineView';
 import { shouldStartLoad } from './handlers/linkRouter';
+import type { NativeRoute } from './hooks/useDeepLink';
 import { useDeepLink } from './hooks/useDeepLink';
 import { useHardwareBack } from './hooks/useHardwareBack';
 import { useNetworkStatus } from './hooks/useNetworkStatus';
@@ -36,8 +37,25 @@ export const WebViewHost: React.FC = () => {
   const [webViewReady, setWebViewReady] = useState<boolean>(false);
   const online = useNetworkStatus();
 
+  const onNativeRoute = useCallback(
+    (route: NativeRoute): boolean => {
+      if (route.pathname === 'confirm') {
+        navigation.navigate('ConfirmRecording', {
+          uri: route.params.uri ?? '',
+          name: route.params.name ?? '',
+          duration: Number(route.params.duration ?? '0'),
+          dateAdded: Number(route.params.dateAdded ?? '0'),
+          mimeType: route.params.mimeType ?? 'audio/mp4',
+        });
+        return true;
+      }
+      return false;
+    },
+    [navigation],
+  );
+
   useHardwareBack(webViewRef, canGoBack);
-  useDeepLink(webViewRef, webViewReady);
+  useDeepLink(webViewRef, webViewReady, onNativeRoute);
 
   const onNavigationStateChange = useCallback((nav: WebViewNavigation) => {
     setCanGoBack(nav.canGoBack);

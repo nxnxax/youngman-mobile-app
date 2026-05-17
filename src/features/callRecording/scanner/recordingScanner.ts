@@ -8,6 +8,14 @@ import {
 
 interface NativeRecordingScanner {
   scanAudio(): Promise<MediaStoreAudio[]>;
+  simulateCallEnd(): Promise<void>;
+}
+
+export async function simulateCallEnd(): Promise<void> {
+  if (Platform.OS !== 'android' || !native) {
+    return;
+  }
+  await native.simulateCallEnd();
 }
 
 const native = (

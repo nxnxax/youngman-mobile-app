@@ -8,6 +8,9 @@ export interface ProcessRecordingInput {
   recorded_at: string;
   phone_number: string | null;
   client_request_id: string;
+  /** Optional: app-resolved contact name from phone book lookup. Server uses
+   *  this as ground truth and overrides LLM customer_name extraction. */
+  customer_name_hint?: string | null;
 }
 
 export async function processRecording(

@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { RootStackParamList } from '../../../navigation/types';
 import { ApiError } from '../../../services/api/client';
 import { isLoggedIn } from '../../../services/auth/session';
+import { lookupContactName } from '../../../services/contacts/lookupContact';
 import { uuidv4 } from '../../../shared/uuid';
 import { processRecording } from '../api/processRecording';
 import { uploadRecording } from '../api/uploadRecording';
@@ -101,6 +102,8 @@ export const OnboardingDemoScreen: React.FC = () => {
     try {
       setStage('uploading');
       const recordedAt = toIso8601KST(rec.dateAdded);
+      const phoneNumber = extractPhoneNumber(rec.displayName);
+      const contactName = await lookupContactName(phoneNumber);
       const uploaded = await uploadRecording({
         contentUri: rec.uri,
         displayName: rec.displayName,
@@ -114,8 +117,9 @@ export const OnboardingDemoScreen: React.FC = () => {
         duration_sec: Math.round(rec.duration / 1000),
         original_filename: rec.displayName,
         recorded_at: recordedAt,
-        phone_number: extractPhoneNumber(rec.displayName),
+        phone_number: phoneNumber,
         client_request_id: uuidv4(),
+        customer_name_hint: contactName,
       });
 
       setStage('idle');

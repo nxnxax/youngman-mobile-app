@@ -4,6 +4,7 @@ import React from 'react';
 import { StatusBar, useColorScheme } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import { ConfirmRecordingScreen } from './src/features/callRecording/screens/ConfirmRecordingScreen';
 import { OnboardingDemoScreen } from './src/features/callRecording/screens/OnboardingDemoScreen';
 import { SummaryReviewScreen } from './src/features/callRecording/screens/SummaryReviewScreen';
 import type { RootStackParamList } from './src/navigation/types';
@@ -26,6 +27,11 @@ function App(): React.JSX.Element {
           <Stack.Screen
             name="OnboardingDemo"
             component={OnboardingDemoScreen}
+            options={{ presentation: 'modal' }}
+          />
+          <Stack.Screen
+            name="ConfirmRecording"
+            component={ConfirmRecordingScreen}
             options={{ presentation: 'modal' }}
           />
           <Stack.Screen

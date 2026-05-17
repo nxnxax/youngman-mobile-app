@@ -36,6 +36,7 @@ function requireToken(): string {
 
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const token = requireToken();
+  const t0 = Date.now();
   const res = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
     headers: {
@@ -45,6 +46,19 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   const parsed = (await parseJsonSafe<T>(res)) as T & ServerError;
+  const elapsed = Date.now() - t0;
+  if (__DEV__) {
+    console.log(
+      '[api] POST',
+      path,
+      'status=',
+      res.status,
+      'time=',
+      `${elapsed}ms`,
+      'body=',
+      JSON.stringify(parsed).slice(0, 800),
+    );
+  }
   if (!res.ok) {
     throw new ApiError(
       parsed.code ?? 'http_error',
@@ -60,6 +74,7 @@ export async function apiPostMultipart<T>(
   form: FormData,
 ): Promise<T> {
   const token = requireToken();
+  const t0 = Date.now();
   const res = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
     // Do NOT set Content-Type — fetch must set it with the multipart boundary.
@@ -67,6 +82,19 @@ export async function apiPostMultipart<T>(
     body: form,
   });
   const parsed = (await parseJsonSafe<T>(res)) as T & ServerError;
+  const elapsed = Date.now() - t0;
+  if (__DEV__) {
+    console.log(
+      '[api] POST multipart',
+      path,
+      'status=',
+      res.status,
+      'time=',
+      `${elapsed}ms`,
+      'body=',
+      JSON.stringify(parsed).slice(0, 800),
+    );
+  }
   if (!res.ok) {
     throw new ApiError(
       parsed.code ?? 'http_error',

@@ -1,5 +1,7 @@
 import type { FirebaseMessagingTypes } from '@react-native-firebase/messaging';
 
+import { refreshProfile } from '../billing/billingStore';
+
 /**
  * Central FCM message router. Called from both:
  *  - background handler (index.js: setBackgroundMessageHandler)
@@ -37,10 +39,11 @@ export async function handleFcmMessage(
       //   deep link to the new customer_log in /customers.html.
       return;
     case 'subscription.statusUpdate':
-      // Plan changed (new subscription, renewed, cancelled, past_due, etc.).
-      // RN should invalidate its plan cache and refetch /api/billing/status
-      // so the entitlement gates flip in lockstep with the server.
-      // TODO(billing): wire to a Zustand/Redux plan store once it exists.
+      // PortOne webhook fired (Transaction.Paid / Cancelled / etc.) →
+      // server fan-out to this device → refresh the auth-profile cache so
+      // entitlement gates + usage indicator flip immediately. Subscribers
+      // of BILLING_PROFILE_UPDATED_EVENT (Settings, banners) re-render.
+      await refreshProfile();
       return;
     default:
       return;

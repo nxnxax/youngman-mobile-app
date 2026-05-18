@@ -17,6 +17,9 @@ import { CUSTOMERS_PATH, USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/en
 import { SESSION_REFRESH_REQUEST_EVENT } from '../../services/api/client';
 import { isLoggedIn } from '../../services/auth/session';
 import { refreshProfile as refreshBillingProfile } from '../../services/billing/billingStore';
+import { TermsAgreementModal } from '../billing/components/TermsAgreementModal';
+import { TrialIntroModal } from '../billing/components/TrialIntroModal';
+import { UsageBanner } from '../billing/components/UsageBanner';
 import { BackgroundPermissionBanner } from '../callRecording/components/BackgroundPermissionBanner';
 import { PendingReminderModal } from '../callRecording/components/PendingReminderModal';
 import { triggerCatchUpScan } from '../callRecording/scanner/recordingScanner';
@@ -401,6 +404,7 @@ export const WebViewHost: React.FC = () => {
     // matches the mobile-browser experience that the web team designs against.
     <SafeAreaView style={styles.container} edges={['top']}>
       <BackgroundPermissionBanner />
+      <UsageBanner />
       <View style={styles.flex}>
         <WebView
           ref={webViewRef}
@@ -442,6 +446,8 @@ export const WebViewHost: React.FC = () => {
         {loadError ? <ErrorView message={loadError} onRetry={reload} /> : null}
       </View>
       <PendingReminderModal triggerKey={reminderTick} />
+      <TermsAgreementModal />
+      <TrialIntroModal />
     </SafeAreaView>
   );
 };

@@ -196,9 +196,9 @@ class OverlayService : Service() {
       dateAdded: Long,
       mimeType: String,
   ) {
-    // Thin progress bar at the top of the screen — visible from the moment
-    // the modal dismisses until the success alert appears. autoSubmitTask
-    // calls ProgressOverlay.hide() right before it pops the success overlay.
+    // Brief 5-second progress card so the user sees confirmation that the
+    // submit was received. After dismiss, work continues silently in
+    // AutoSubmitService and the success overlay pops on completion.
     ProgressOverlayService.start(this)
 
     val intent =
@@ -213,13 +213,15 @@ class OverlayService : Service() {
           selectedGroupId?.let { putExtra(EXTRA_GROUP_ID, it) }
         }
     try {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        startForegroundService(intent)
-      } else {
-        startService(intent)
-      }
-    } catch (_: Exception) {
-      // ignore
+      // Plain startService — NOT a foreground service. The user's tap on
+      // this overlay grants us the background-start exemption on Android
+      // 12+, so this call succeeds even though OverlayService itself runs
+      // in the background. The trade-off (no FGS = no visible notification
+      // = OS may reclaim under memory pressure) is intentional — see
+      // AutoSubmitService kdoc.
+      startService(intent)
+    } catch (e: Exception) {
+      Log.w(TAG, "startService(AutoSubmit) failed", e)
     }
   }
 

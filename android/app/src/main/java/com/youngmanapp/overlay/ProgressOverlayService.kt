@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -24,6 +26,8 @@ class ProgressOverlayService : Service() {
 
   private var overlayView: View? = null
   private lateinit var windowManager: WindowManager
+  private val handler = Handler(Looper.getMainLooper())
+  private val autoDismiss = Runnable { dismiss() }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -42,6 +46,11 @@ class ProgressOverlayService : Service() {
       return START_NOT_STICKY
     }
     showOverlay()
+    // Auto-dismiss after 5s so the user is free to use their phone while the
+    // headless task continues in the background. The success overlay will
+    // pop up on completion regardless of where the user is.
+    handler.removeCallbacks(autoDismiss)
+    handler.postDelayed(autoDismiss, AUTO_DISMISS_MS)
     return START_STICKY
   }
 
@@ -82,6 +91,7 @@ class ProgressOverlayService : Service() {
   }
 
   private fun dismiss() {
+    handler.removeCallbacks(autoDismiss)
     val view = overlayView
     if (view != null) {
       try {
@@ -93,6 +103,7 @@ class ProgressOverlayService : Service() {
   }
 
   override fun onDestroy() {
+    handler.removeCallbacks(autoDismiss)
     val view = overlayView
     if (view != null) {
       try {
@@ -105,6 +116,7 @@ class ProgressOverlayService : Service() {
 
   companion object {
     private const val TAG = "ProgressOverlay"
+    private const val AUTO_DISMISS_MS = 5_000L
     const val ACTION_STOP = "stop"
 
     fun start(ctx: Context) {

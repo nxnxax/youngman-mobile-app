@@ -47,6 +47,36 @@ export async function listCustomerLogs(
   });
 }
 
+/**
+ * Fetch customer_logs that have NOT yet been pushed to a ledger group
+ * (`linked_ledger_record_id` is explicitly `null`). Used by the daily catch-up
+ * reminder. We use STRICT equality on purpose — if the server omits the field
+ * we treat the row as "unknown" rather than "pending" and skip it, so the
+ * modal never lists already-processed rows just because the API response was
+ * silent about that column.
+ */
+export async function listPendingCustomerLogs(
+  limit = 100,
+): Promise<ReadonlyArray<CustomerLogRow>> {
+  const res = await listCustomerLogs({ limit });
+  if (__DEV__) {
+    const breakdown = res.items.map(r => ({
+      id: r.id.slice(0, 8),
+      name: r.customer_name,
+      consult: r.consult_at,
+      link: r.linked_ledger_record_id,
+      crid: r.client_request_id,
+    }));
+    console.log(
+      '[PendingDiag] total=',
+      res.items.length,
+      'rows=',
+      JSON.stringify(breakdown),
+    );
+  }
+  return res.items.filter(row => row.linked_ledger_record_id === null);
+}
+
 export async function getCustomerLog(
   id: string,
 ): Promise<{ customer_log: CustomerLogRow }> {

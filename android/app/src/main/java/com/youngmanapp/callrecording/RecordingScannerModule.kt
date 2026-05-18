@@ -123,6 +123,23 @@ class RecordingScannerModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  /**
+   * Safety-net catch-up: triggers a PostCallScanService run without resetting
+   * the baseline. Used when the app returns to the foreground — if Android put
+   * us to sleep and we missed a PHONE_STATE broadcast, this will find the new
+   * recording (date_added > baseline) and pop the overlay anyway. If nothing
+   * is missed, the service simply times out after 30s.
+   */
+  @ReactMethod
+  fun triggerCatchUpScan(promise: Promise) {
+    try {
+      PostCallScanService.start(reactApplicationContext)
+      promise.resolve(null)
+    } catch (e: Exception) {
+      promise.reject("CATCHUP_FAILED", e.message, e)
+    }
+  }
+
   companion object {
     const val NAME = "RecordingScanner"
   }

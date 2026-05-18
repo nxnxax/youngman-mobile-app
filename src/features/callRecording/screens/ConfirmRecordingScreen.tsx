@@ -3,7 +3,7 @@ import type {
   NativeStackNavigationProp,
   RouteProp,
 } from '@react-navigation/native-stack';
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -18,7 +18,7 @@ import type { RootStackParamList } from '../../../navigation/types';
 import { ApiError } from '../../../services/api/client';
 import { isLoggedIn } from '../../../services/auth/session';
 import { lookupContactName } from '../../../services/contacts/lookupContact';
-import { uuidv4 } from '../../../shared/uuid';
+import { deterministicRequestId } from '../../../shared/uuid';
 import { processRecording } from '../api/processRecording';
 import { fetchLedgerGroups } from '../api/records';
 import type { LedgerGroup } from '../api/types';
@@ -60,7 +60,11 @@ export const ConfirmRecordingScreen: React.FC = () => {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Route>();
   const { uri, name, duration, dateAdded, mimeType } = route.params;
-  const [stage, setStage] = useState<Stage>('idle');
+  // Start in `uploading` so the screen never flashes the idle button — the
+  // recording UX is "one-tap from the modal" and this screen only exists to
+  // show progress before SummaryReview opens.
+  const [stage, setStage] = useState<Stage>('uploading');
+  const startedRef = useRef(false);
 
   const phoneNumber = extractPhoneNumber(name);
   const recordedAt = toIso8601KST(dateAdded);
@@ -91,7 +95,7 @@ export const ConfirmRecordingScreen: React.FC = () => {
         original_filename: name,
         recorded_at: recordedAt,
         phone_number: phoneNumber,
-        client_request_id: uuidv4(),
+        client_request_id: deterministicRequestId(uri),
         customer_name_hint: contactName,
       });
 
@@ -121,9 +125,30 @@ export const ConfirmRecordingScreen: React.FC = () => {
         return;
       }
       const msg = e instanceof ApiError ? e.message : String(e);
-      Alert.alert('처리 실패', msg);
+      Alert.alert('처리 실패', msg, [
+        { text: '확인', onPress: () => navigation.goBack() },
+      ]);
     }
   };
+
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    void onProcess();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Animate the trailing "..." on the loading label so the text itself looks
+  // alive (".  " → ".. " → "...").
+  const [dots, setDots] = useState('...');
+  useEffect(() => {
+    let count = 3;
+    const id = setInterval(() => {
+      count = (count % 3) + 1;
+      setDots('.'.repeat(count));
+    }, 400);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -131,41 +156,14 @@ export const ConfirmRecordingScreen: React.FC = () => {
         <Pressable
           onPress={() => navigation.goBack()}
           hitSlop={12}
-          disabled={stage !== 'idle'}
         >
-          <Text style={[styles.close, stage !== 'idle' && styles.closeDisabled]}>
-            나중에
-          </Text>
+          <Text style={styles.close}>나중에</Text>
         </Pressable>
       </View>
 
-      <View style={styles.body}>
-        <Text style={styles.title}>새 통화녹음이 있어요</Text>
-        <Text style={styles.subtitle}>
-          방금 끝난 통화를 AI가 요약해서{'\n'}고객관리대장에 기록해드릴게요.
-        </Text>
-
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>통화 상대</Text>
-          <Text style={styles.cardValue}>{phoneNumber ?? '번호 미확인'}</Text>
-          <Text style={styles.meta}>
-            {formatDate(dateAdded)} · {formatDuration(duration)}
-          </Text>
-          {stage === 'idle' ? (
-            <Pressable style={styles.primaryButton} onPress={onProcess}>
-              <Text style={styles.primaryButtonText}>요약하기</Text>
-            </Pressable>
-          ) : (
-            <View style={styles.progressBlock}>
-              <ActivityIndicator />
-              <Text style={styles.progressText}>
-                {stage === 'uploading'
-                  ? '오디오 업로드 중…'
-                  : 'AI 분석 중 (30~60초)…'}
-              </Text>
-            </View>
-          )}
-        </View>
+      <View style={styles.loadingBody}>
+        <ActivityIndicator size="large" color="#0066FF" />
+        <Text style={styles.loadingText}>AI 요약 중{dots}</Text>
       </View>
     </SafeAreaView>
   );
@@ -180,33 +178,17 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   close: { color: '#666', fontSize: 15 },
-  closeDisabled: { color: '#CCC' },
-  body: { flex: 1, paddingHorizontal: 24, paddingTop: 12 },
-  title: { fontSize: 24, fontWeight: '700', color: '#111' },
-  subtitle: { fontSize: 15, color: '#444', marginTop: 8, lineHeight: 22 },
-  card: {
-    marginTop: 32,
-    padding: 20,
-    backgroundColor: '#F6F8FB',
-    borderRadius: 14,
-    gap: 8,
-  },
-  cardLabel: { fontSize: 13, color: '#666' },
-  cardValue: { fontSize: 22, fontWeight: '700', color: '#0066FF' },
-  meta: { fontSize: 14, color: '#444' },
-  primaryButton: {
-    marginTop: 20,
-    backgroundColor: '#0066FF',
-    paddingVertical: 14,
-    borderRadius: 10,
+  loadingBody: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
+    paddingBottom: 80,
+    gap: 20,
   },
-  primaryButtonText: { color: '#FFFFFF', fontWeight: '700', fontSize: 16 },
-  progressBlock: {
-    marginTop: 20,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
+  loadingText: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#111111',
+    letterSpacing: -0.2,
   },
-  progressText: { color: '#444', fontSize: 14 },
 });

@@ -9,6 +9,7 @@ import {
 interface NativeRecordingScanner {
   scanAudio(): Promise<MediaStoreAudio[]>;
   simulateCallEnd(): Promise<void>;
+  triggerCatchUpScan(): Promise<void>;
 }
 
 export async function simulateCallEnd(): Promise<void> {
@@ -16,6 +17,23 @@ export async function simulateCallEnd(): Promise<void> {
     return;
   }
   await native.simulateCallEnd();
+}
+
+/**
+ * Safety net: ask the native side to run a PostCallScanService cycle without
+ * resetting its baseline. If Android put us to sleep and we missed a
+ * PHONE_STATE broadcast, this will still find any recording newer than the
+ * last one we surfaced and pop the modal. No-op when nothing was missed.
+ */
+export async function triggerCatchUpScan(): Promise<void> {
+  if (Platform.OS !== 'android' || !native) {
+    return;
+  }
+  try {
+    await native.triggerCatchUpScan();
+  } catch {
+    // never throw upward — this is best-effort
+  }
 }
 
 const native = (

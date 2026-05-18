@@ -1,11 +1,11 @@
 package com.youngmanapp.overlay
 
-import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -16,13 +16,17 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
-import android.view.animation.OvershootInterpolator
+import com.facebook.react.ReactApplication
+import com.facebook.react.bridge.ReactContext
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.youngmanapp.R
 
 /**
- * Small glass-style confirmation overlay shown after a successful auto-submit.
- * Pops up at screen center with a green check + "양식 전송 완료", animates in
- * (card fade + check scale-overshoot), holds briefly, then fades out.
+ * iOS-style confirmation alert shown after a successful send_to_group.
+ * Header "저장됨" + body "고객관리대장에 반영됐어요." + single "확인" button.
+ * Auto-dismisses after 5s; tapping "확인" dismisses immediately. In both
+ * cases a DeviceEventEmitter event is fired so any RN screen above us (e.g.
+ * SummaryReview) can also dismiss in sync.
  *
  * Requires SYSTEM_ALERT_WINDOW. Silent no-op if permission missing.
  */
@@ -56,15 +60,25 @@ class SuccessOverlayService : Service() {
     val view =
         LayoutInflater.from(this).inflate(R.layout.overlay_success, null, false)
 
+    view.findViewById<View>(R.id.success_btn_ok).setOnClickListener {
+      dismissWithSync()
+    }
+
+    view.findViewById<View>(R.id.success_btn_customer).setOnClickListener {
+      openCustomerLedger()
+      dismissWithSync()
+    }
+
     val type =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
+    // FLAG_NOT_TOUCHABLE removed so the "확인" button is tappable.
     val flags =
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_DIM_BEHIND
 
     val params =
         WindowManager.LayoutParams(
@@ -75,11 +89,13 @@ class SuccessOverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         )
     params.gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
+    params.dimAmount = 0.35f
 
     try {
       windowManager.addView(view, params)
       overlayView = view
       animateIn(view)
+      handler.postDelayed({ dismissWithSync() }, HOLD_MS)
     } catch (e: Exception) {
       Log.w(TAG, "addView failed", e)
       stopSelf()
@@ -87,53 +103,26 @@ class SuccessOverlayService : Service() {
   }
 
   private fun animateIn(view: View) {
-    val check = view.findViewById<View>(R.id.success_check)
-    val text = view.findViewById<View>(R.id.success_text)
-
-    // Card fade-in (the whole overlay starts invisible)
     view.alpha = 0f
-    val cardFade = ObjectAnimator.ofFloat(view, "alpha", 0f, 1f).apply {
-      duration = 180
-    }
-
-    // Check icon scale with overshoot (0.3 → 1.0)
-    check.scaleX = 0.3f
-    check.scaleY = 0.3f
-    val checkScaleX = ObjectAnimator.ofFloat(check, "scaleX", 0.3f, 1f).apply {
-      duration = 380
-      interpolator = OvershootInterpolator(2.0f)
-      startDelay = 80
-    }
-    val checkScaleY = ObjectAnimator.ofFloat(check, "scaleY", 0.3f, 1f).apply {
-      duration = 380
-      interpolator = OvershootInterpolator(2.0f)
-      startDelay = 80
-    }
-
-    // Text slight slide-up
-    text.alpha = 0f
-    text.translationY = 8f
-    val textFade = ObjectAnimator.ofFloat(text, "alpha", 0f, 1f).apply {
-      duration = 240
-      startDelay = 200
-    }
-    val textSlide = ObjectAnimator.ofFloat(text, "translationY", 8f, 0f).apply {
-      duration = 240
-      startDelay = 200
-    }
-
-    AnimatorSet().apply {
-      playTogether(cardFade, checkScaleX, checkScaleY, textFade, textSlide)
+    ObjectAnimator.ofFloat(view, "alpha", 0f, 1f).apply {
+      duration = 220
       start()
     }
-
-    handler.postDelayed({ animateOutAndDismiss() }, HOLD_MS)
   }
 
-  private fun animateOutAndDismiss() {
+  /** Dismiss the overlay AND notify any RN listener so dependent screens
+   *  (SummaryReview) can pop in lockstep. Safe to call multiple times — the
+   *  scheduled auto-dismiss may race with a manual confirm tap. */
+  private fun dismissWithSync() {
+    handler.removeCallbacksAndMessages(null)
+    emitDismissEvent()
+    animateOutAndStop()
+  }
+
+  private fun animateOutAndStop() {
     val view = overlayView ?: return run { stopSelf() }
     val fadeOut = ObjectAnimator.ofFloat(view, "alpha", view.alpha, 0f).apply {
-      duration = 220
+      duration = 200
     }
     fadeOut.addListener(
         object : android.animation.AnimatorListenerAdapter() {
@@ -144,6 +133,44 @@ class SuccessOverlayService : Service() {
         }
     )
     fadeOut.start()
+  }
+
+  /** Bring the app to the foreground and ask the WebView to navigate to the
+   *  customer ledger page. Uses the existing `youngman://record/<route>` deep
+   *  link plumbing; the RN side handles the route in WebViewHost.onNativeRoute. */
+  private fun openCustomerLedger() {
+    val deepLink = Uri.Builder()
+        .scheme("youngman")
+        .authority("record")
+        .appendPath("customer-ledger")
+        .build()
+    val intent = Intent(Intent.ACTION_VIEW, deepLink).apply {
+      flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+      `package` = packageName
+    }
+    try {
+      startActivity(intent)
+    } catch (e: Exception) {
+      Log.w(TAG, "openCustomerLedger failed", e)
+    }
+  }
+
+  private fun emitDismissEvent() {
+    val reactContext: ReactContext? = try {
+      (applicationContext as? ReactApplication)
+          ?.reactHost
+          ?.currentReactContext
+    } catch (e: Throwable) {
+      Log.w(TAG, "emit: react context lookup failed", e)
+      null
+    }
+    try {
+      reactContext
+          ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+          ?.emit(EVENT_DISMISSED, null)
+    } catch (e: Throwable) {
+      Log.w(TAG, "emit failed", e)
+    }
   }
 
   private fun dismissView() {
@@ -162,7 +189,8 @@ class SuccessOverlayService : Service() {
 
   companion object {
     private const val TAG = "SuccessOverlay"
-    private const val HOLD_MS = 1500L
+    private const val HOLD_MS = 5_000L
+    const val EVENT_DISMISSED = "successOverlayDismissed"
 
     fun start(ctx: Context) {
       val intent = Intent(ctx, SuccessOverlayService::class.java)

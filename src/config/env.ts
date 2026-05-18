@@ -1,6 +1,10 @@
 export const WEB_BASE_URL = 'https://youngman-biz.com';
 export const API_BASE_URL = 'https://youngman-biz.com';
 
+/** Path of the customer ledger page inside the web shell. Reached via the
+ *  "고객관리 바로가기" button on the success alert. */
+export const CUSTOMERS_PATH = '/customers.html';
+
 export const ALLOWED_HOSTS: ReadonlyArray<string> = [
   'youngman-biz.com',
   'www.youngman-biz.com',

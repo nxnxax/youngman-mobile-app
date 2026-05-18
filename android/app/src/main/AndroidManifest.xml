@@ -99,6 +99,10 @@
           android:exported="false" />
 
       <service
+          android:name=".overlay.ProgressOverlayService"
+          android:exported="false" />
+
+      <service
           android:name=".overlay.AutoSubmitService"
           android:foregroundServiceType="dataSync"
           android:exported="false" />

@@ -76,11 +76,18 @@ class OverlayService : Service() {
     }
 
     showOverlay(uri, name, duration, dateAdded, mimeType)
-    handler.postDelayed(autoDismiss, AUTO_DISMISS_MS)
+    scheduleAutoDismiss()
     return START_NOT_STICKY
   }
 
   private val autoDismiss = Runnable { dismiss() }
+
+  /** Reset the inactivity timer — called on the initial show AND on every
+   *  user touch routed through the overlay root view. */
+  private fun scheduleAutoDismiss() {
+    handler.removeCallbacks(autoDismiss)
+    handler.postDelayed(autoDismiss, AUTO_DISMISS_MS)
+  }
 
   private fun hasOverlayPermission(): Boolean =
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(this) else true
@@ -95,6 +102,10 @@ class OverlayService : Service() {
     dismissView()
 
     val view = LayoutInflater.from(this).inflate(R.layout.overlay_recording_found, null, false)
+
+    // Any touch inside the modal (chip tap, dropdown scroll, blank space) resets
+    // the inactivity timer so the modal does not vanish mid-interaction.
+    (view as? DismissableTouchFrameLayout)?.onUserTouch = { scheduleAutoDismiss() }
 
     view.findViewById<TextView>(R.id.overlay_subtitle).text = buildSubtitle(name, duration)
 
@@ -117,13 +128,11 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-    var flags =
+    // iOS-style alert: solid white card on top of a dimmed backdrop. No blur.
+    val flags =
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-    }
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_DIM_BEHIND
 
     val params =
         WindowManager.LayoutParams(
@@ -134,17 +143,7 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         )
     params.gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
-    params.y = -dpToPx(40)
-
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      try {
-        params.blurBehindRadius = dpToPx(40)
-        // No dim — keep the rest of the screen un-darkened so the modal feels
-        // floaty and unobtrusive, not full-screen.
-      } catch (e: Throwable) {
-        Log.w(TAG, "blur setup failed", e)
-      }
-    }
+    params.dimAmount = 0.35f
 
     try {
       windowManager.addView(view, params)
@@ -194,6 +193,11 @@ class OverlayService : Service() {
       dateAdded: Long,
       mimeType: String,
   ) {
+    // Thin progress bar at the top of the screen — visible from the moment
+    // the modal dismisses until the success alert appears. autoSubmitTask
+    // calls ProgressOverlay.hide() right before it pops the success overlay.
+    ProgressOverlayService.start(this)
+
     val intent =
         Intent(this, AutoSubmitService::class.java).apply {
           putExtra(EXTRA_URI, uri)

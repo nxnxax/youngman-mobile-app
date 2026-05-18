@@ -13,8 +13,10 @@ import type {
 
 import type { RootStackParamList } from '../../navigation/types';
 
-import { USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/env';
+import { CUSTOMERS_PATH, USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/env';
 import { isLoggedIn } from '../../services/auth/session';
+import { PendingReminderModal } from '../callRecording/components/PendingReminderModal';
+import { triggerCatchUpScan } from '../callRecording/scanner/recordingScanner';
 import { syncLedgerGroupsToNative } from '../callRecording/services/ledgerGroupsSync';
 import { buildInjectedScript } from './bridge/injectedScript';
 import type { AuthLoginPayload } from './bridge/messageHandler';
@@ -42,6 +44,10 @@ export const WebViewHost: React.FC = () => {
   const onNativeRoute = useCallback(
     (route: NativeRoute): boolean => {
       if (route.pathname === 'confirm') {
+        // Clear any stale modal stack first — if the user opened a previous
+        // call's SummaryReview but never sent it, leaving that screen alive
+        // would let it shadow the new call's flow on failure / back press.
+        navigation.popToTop();
         navigation.navigate('ConfirmRecording', {
           uri: route.params.uri ?? '',
           name: route.params.name ?? '',
@@ -49,6 +55,18 @@ export const WebViewHost: React.FC = () => {
           dateAdded: Number(route.params.dateAdded ?? '0'),
           mimeType: route.params.mimeType ?? 'audio/mp4',
         });
+        return true;
+      }
+      if (route.pathname === 'customer-ledger') {
+        // Make sure the WebView is the top screen (close any modal stack —
+        // SuccessOverlay's dismiss event already pops SummaryReview, but a
+        // direct deep-link entry from a foreign app would still need this),
+        // then tell the WebView to navigate to the customer ledger page.
+        navigation.popToTop();
+        const target = `${WEB_BASE_URL}${CUSTOMERS_PATH}`;
+        webViewRef.current?.injectJavaScript(
+          `window.location.href = ${JSON.stringify(target)}; true;`,
+        );
         return true;
       }
       return false;
@@ -59,13 +77,23 @@ export const WebViewHost: React.FC = () => {
   useHardwareBack(webViewRef, canGoBack);
   useDeepLink(webViewRef, webViewReady, onNativeRoute);
 
-  // Refresh native ledger-groups cache whenever the app returns to foreground —
-  // covers the case where the user adds/renames a group inside the WebView and
-  // then ends a call. auth.login also triggers a sync; this is the safety net.
+  // Bumped on every foreground entry so the daily pending-logs reminder can
+  // re-evaluate. The reminder itself is 24h-throttled in storage so a bump
+  // doesn't actually open the modal more than once a day.
+  const [reminderTick, setReminderTick] = useState(0);
+
+  // Returning to foreground does three things:
+  //  1) Refresh the native ledger-groups cache (chips up-to-date).
+  //  2) Trigger a catch-up scan — if Android put us to sleep and a recent call
+  //     ended without PHONE_STATE reaching us, the post-call service runs now
+  //     and surfaces the missed recording. Core promise: no call left behind.
+  //  3) Re-evaluate the daily reminder for un-sent customer logs.
   useEffect(() => {
     const sub = AppState.addEventListener('change', state => {
       if (state === 'active' && isLoggedIn()) {
         void syncLedgerGroupsToNative();
+        void triggerCatchUpScan();
+        setReminderTick(t => t + 1);
       }
     });
     return () => sub.remove();
@@ -158,7 +186,12 @@ export const WebViewHost: React.FC = () => {
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+    // No `bottom` edge — the web shell already renders its own sticky bottom
+    // nav (홈 / 고객관리대장 / 신규 양식 / 신규 양식) and pinning that bar to
+    // a safe-area inset leaves a tall white gap below it on devices with a
+    // system navigation bar. The WebView painting through to the screen edge
+    // matches the mobile-browser experience that the web team designs against.
+    <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.flex}>
         <WebView
           ref={webViewRef}
@@ -199,6 +232,7 @@ export const WebViewHost: React.FC = () => {
         {loading && !loadError ? <LoadingOverlay /> : null}
         {loadError ? <ErrorView message={loadError} onRetry={reload} /> : null}
       </View>
+      <PendingReminderModal triggerKey={reminderTick} />
     </SafeAreaView>
   );
 };

@@ -7,6 +7,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  DeviceEventEmitter,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -27,6 +28,7 @@ import type {
   LedgerGroup,
 } from '../api/types';
 import { ApiError } from '../../../services/api/client';
+import { showSuccessOverlay } from '../../../services/overlay/showSuccessOverlay';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'SummaryReview'>;
 type Route = RouteProp<RootStackParamList, 'SummaryReview'>;
@@ -42,10 +44,6 @@ const FIELDS: ReadonlyArray<FieldDef> = [
   { key: 'customer_name', label: '고객명', placeholder: '예: 김상우' },
   { key: 'phone_number', label: '전화번호', placeholder: '010-1234-5678' },
   { key: 'summary', label: '통화 요약', multiline: true },
-  { key: 'interest', label: '관심 내용', multiline: true },
-  { key: 'inquiry', label: '문의 사항', multiline: true },
-  { key: 'budget_condition', label: '예산/희망 조건', multiline: true },
-  { key: 'next_action', label: '다음 액션', multiline: true },
   { key: 'agent_memo', label: '담당자 메모', multiline: true, placeholder: '본인 메모 (선택)' },
 ];
 
@@ -122,16 +120,27 @@ export const SummaryReviewScreen: React.FC = () => {
         group_id: groupId,
         override: Object.keys(override).length > 0 ? override : undefined,
       });
-      Alert.alert('저장됨', '고객관리대장에 반영됐어요.', [
-        { text: '확인', onPress: () => navigation.popToTop() },
-      ]);
+      // Native shows the success overlay; it will fire
+      // 'successOverlayDismissed' on auto-timeout or "확인" tap, and our
+      // listener below pops SummaryReview at the same instant.
+      showSuccessOverlay();
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
       Alert.alert('저장 실패', msg);
     } finally {
       setSaving(false);
     }
-  }, [groupId, initialRow.id, navigation, original, values]);
+  }, [groupId, initialRow.id, original, values]);
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(
+      'successOverlayDismissed',
+      () => {
+        navigation.popToTop();
+      },
+    );
+    return () => sub.remove();
+  }, [navigation]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -156,21 +165,20 @@ export const SummaryReviewScreen: React.FC = () => {
       >
         <Text style={styles.title}>AI 요약 결과</Text>
         <Text style={styles.subtitle}>
-          AI가 정리한 내용이에요. 필요하면 수정하고 [저장] 누르세요.
+          AI가 정리한 내용이에요. 필요하면 수정해주세요.
         </Text>
 
         <View style={styles.metaCard}>
           <Text style={styles.metaText}>
             상담일시 {new Date(initialRow.consult_at).toLocaleString('ko-KR')}
           </Text>
-          <Text style={styles.metaText}>모델 {initialRow.ai_model}</Text>
         </View>
 
+        <Text style={styles.groupPickerLabel}>양식을 전송할 그룹</Text>
         <Pressable
           style={styles.groupChip}
           onPress={() => setGroupPickerOpen(true)}
         >
-          <Text style={styles.groupChipLabel}>전송 그룹</Text>
           <Text style={styles.groupChipValue} numberOfLines={1}>
             {selectedGroupTitle}
           </Text>
@@ -268,27 +276,27 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 20,
     paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 1,
     borderBottomColor: '#E5E5E5',
   },
-  close: { color: '#666', fontSize: 15 },
+  close: { color: '#FF3B30', fontSize: 15 },
   save: { color: '#0066FF', fontSize: 15, fontWeight: '700' },
   saveInactive: { color: '#999' },
   body: { padding: 24, paddingBottom: 64 },
   title: { fontSize: 22, fontWeight: '700', color: '#111' },
-  subtitle: { fontSize: 14, color: '#555', marginTop: 6, lineHeight: 20 },
+  subtitle: { fontSize: 14, color: '#666666', marginTop: 6, lineHeight: 20 },
   metaCard: {
     marginTop: 16,
     padding: 12,
-    backgroundColor: '#F6F8FB',
+    backgroundColor: '#F5F5F7',
     borderRadius: 8,
   },
-  metaText: { color: '#555', fontSize: 13, marginVertical: 1 },
+  metaText: { color: '#666666', fontSize: 13, marginVertical: 1 },
   fieldBlock: { marginTop: 16 },
-  fieldLabel: { fontSize: 13, color: '#444', marginBottom: 6 },
+  fieldLabel: { fontSize: 13, color: '#666666', marginBottom: 6 },
   input: {
     borderWidth: 1,
-    borderColor: '#DDD',
+    borderColor: '#DCDCDC',
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -305,26 +313,30 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   savingText: { color: '#666' },
+  groupPickerLabel: {
+    marginTop: 16,
+    fontSize: 13,
+    color: '#666666',
+    marginBottom: 6,
+  },
   groupChip: {
-    marginTop: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    borderRadius: 10,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
-    backgroundColor: '#FFFFFF',
+    borderColor: '#DCDCDC',
+    backgroundColor: '#F5F5F7',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
-  groupChipLabel: { fontSize: 13, color: '#666' },
   groupChipValue: {
     flex: 1,
     fontSize: 14,
-    fontWeight: '600',
-    color: '#0066FF',
+    fontWeight: '700',
+    color: '#111111',
   },
-  groupChipChevron: { fontSize: 14, color: '#999' },
+  groupChipChevron: { fontSize: 13, color: '#888888' },
   sheetBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.35)',

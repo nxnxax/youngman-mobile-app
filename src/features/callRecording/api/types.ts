@@ -21,6 +21,9 @@ export interface CustomerLogRow {
   ai_generated_at: string;
   source: string;
   client_request_id: string;
+  /** `null` until the user has run send_to_group on this log. Used to detect
+   *  "pending" rows for the daily catch-up reminder. */
+  linked_ledger_record_id: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -80,4 +83,8 @@ export interface SendToGroupResponse {
   group_title: string;
   ledger_record_id: string;
   created_group: boolean;
+  /** Web team's catch-up backfill (commit 7f01404): how many other
+   *  same-phone unlinked customer_log rows were swept into this ledger by
+   *  this single call. 0 when there were no leftovers. */
+  backfilled_count?: number;
 }

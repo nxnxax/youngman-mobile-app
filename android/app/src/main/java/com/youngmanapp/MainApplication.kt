@@ -10,6 +10,7 @@ import com.youngmanapp.callrecording.RecordingScannerPackage
 import com.youngmanapp.contacts.ContactsPackage
 import com.youngmanapp.ledger.LedgerGroupsPackage
 import com.youngmanapp.logging.ErrorLogPackage
+import com.youngmanapp.overlay.ProgressOverlayPackage
 import com.youngmanapp.overlay.SuccessOverlayPackage
 import com.youngmanapp.system.BackgroundRestrictionPackage
 
@@ -26,6 +27,7 @@ class MainApplication : Application(), ReactApplication {
           add(ErrorLogPackage())
           add(LedgerGroupsPackage())
           add(SuccessOverlayPackage())
+          add(ProgressOverlayPackage())
         },
     )
   }

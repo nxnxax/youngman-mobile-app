@@ -1,8 +1,9 @@
 import { restoreSession, isLoggedIn } from '../../../services/auth/session';
 import { lookupContactName } from '../../../services/contacts/lookupContact';
 import { logError } from '../../../services/logger/errorLog';
+import { hideProgressOverlay } from '../../../services/overlay/progressOverlay';
 import { showSuccessOverlay } from '../../../services/overlay/showSuccessOverlay';
-import { uuidv4 } from '../../../shared/uuid';
+import { deterministicRequestId } from '../../../shared/uuid';
 import { processRecording } from '../api/processRecording';
 import { sendCustomerLogToGroup } from '../api/records';
 import { uploadRecording } from '../api/uploadRecording';
@@ -34,6 +35,7 @@ export async function autoSubmitTask(
 ): Promise<void> {
   await restoreSession();
   if (!isLoggedIn()) {
+    hideProgressOverlay();
     logError('AutoSubmit', 'no session — task aborting', {
       name: data.name,
       duration: data.duration,
@@ -59,7 +61,7 @@ export async function autoSubmitTask(
       original_filename: data.name,
       recorded_at: recordedAt,
       phone_number: phoneNumber,
-      client_request_id: uuidv4(),
+      client_request_id: deterministicRequestId(data.uri),
       customer_name_hint: contactName,
     });
 
@@ -68,6 +70,7 @@ export async function autoSubmitTask(
       group_id: data.groupId ?? null,
     });
 
+    hideProgressOverlay();
     showSuccessOverlay();
 
     if (__DEV__) {
@@ -78,9 +81,12 @@ export async function autoSubmitTask(
         'group=',
         sent.group_title,
         sent.created_group ? '(default created)' : '',
+        'backfilled=',
+        sent.backfilled_count ?? 0,
       );
     }
   } catch (e) {
+    hideProgressOverlay();
     logError('AutoSubmit', e, {
       name: data.name,
       duration: data.duration,

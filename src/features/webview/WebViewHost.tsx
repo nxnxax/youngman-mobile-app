@@ -17,7 +17,12 @@ import { CUSTOMERS_PATH, USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/en
 import { SESSION_REFRESH_REQUEST_EVENT } from '../../services/api/client';
 import { isLoggedIn } from '../../services/auth/session';
 import { refreshProfile as refreshBillingProfile } from '../../services/billing/billingStore';
-import { TermsAgreementModal } from '../billing/components/TermsAgreementModal';
+// TermsAgreementModal — intentionally NOT imported. Korean signup flow on
+// the web (subscribe.html / signup form) already requires 이용약관 +
+// 개인정보 consent at registration. Asking again in-app is redundant and
+// scares off free-tier users. Policy pages remain accessible any time via
+// Settings → 약관 / 정책. The component file is kept for archive in case
+// web team's signup ever needs to drop the checkboxes.
 import { TrialIntroModal } from '../billing/components/TrialIntroModal';
 import { UsageBanner } from '../billing/components/UsageBanner';
 import { BackgroundPermissionBanner } from '../callRecording/components/BackgroundPermissionBanner';
@@ -446,7 +451,6 @@ export const WebViewHost: React.FC = () => {
         {loadError ? <ErrorView message={loadError} onRetry={reload} /> : null}
       </View>
       <PendingReminderModal triggerKey={reminderTick} />
-      <TermsAgreementModal />
       <TrialIntroModal />
     </SafeAreaView>
   );

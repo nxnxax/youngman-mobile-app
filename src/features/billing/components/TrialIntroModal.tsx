@@ -19,12 +19,10 @@ import {
 const SEEN_KEY = '@youngman/trialIntroSeen.v1';
 
 /**
- * One-shot intro for new users on the trial plan — "통화 AI 요약 5회 체험"
- * card. Surfaces the moment we first observe `plan_status === 'trialing'`
- * for this device, then stays dismissed (AsyncStorage flag).
- *
- * Mounted globally inside WebViewHost so it can fire regardless of which
- * screen the user is on at the time of first-load.
+ * One-shot intro for new users with plan_status === 'trialing'. AsyncStorage
+ * flag ensures one-time display per device. Visual matches the post-call
+ * overlay style (overlay_recording_found.xml): white card, 14dp radius,
+ * hairline-divided bottom buttons.
  */
 export const TrialIntroModal: React.FC = () => {
   const [visible, setVisible] = useState(false);
@@ -32,7 +30,6 @@ export const TrialIntroModal: React.FC = () => {
     getCachedProfile(),
   );
 
-  // Track the latest profile — modal is gated on plan_status === 'trialing'.
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener(
       BILLING_PROFILE_UPDATED_EVENT,
@@ -41,7 +38,6 @@ export const TrialIntroModal: React.FC = () => {
     return () => sub.remove();
   }, []);
 
-  // When a fresh trialing profile arrives, decide whether to show.
   useEffect(() => {
     if (!profile) return;
     if (profile.plan_status !== 'trialing') return;
@@ -75,101 +71,79 @@ export const TrialIntroModal: React.FC = () => {
       animationType="fade"
       onRequestClose={() => void onDismiss()}
     >
-      <Pressable style={styles.backdrop} onPress={() => void onDismiss()}>
-        <Pressable style={styles.card} onPress={() => {}}>
-          <View style={styles.heart}>
-            <Text style={styles.heartText}>🎁</Text>
+      <View style={styles.backdrop}>
+        <View style={styles.card}>
+          <View style={styles.body}>
+            <Text style={styles.title}>{remaining}회 무료 체험을 드려요</Text>
+            <Text style={styles.subtitle}>
+              영맨을 처음 시작하셨군요!{'\n'}
+              통화 AI 요약 기능을 {remaining}회 무료로 사용해보세요.
+            </Text>
           </View>
-          <Text style={styles.title}>5회 무료 체험을 드려요</Text>
-          <Text style={styles.body}>
-            영맨을 처음 시작하셨군요!{'\n'}
-            지금부터 통화 AI 요약 기능을 {remaining}회 무료로 사용해보실 수 있어요.
-          </Text>
-          <View style={styles.featureBox}>
-            <Feature text="통화 자동 감지 + 한 번에 양식 전송" />
-            <Feature text="고객별 통화 이력 + 핵심 요약 자동 정리" />
-            <Feature text="다음 통화 때 상대 정보 자동 표시" />
+
+          <View style={styles.hairline} />
+
+          <View style={styles.buttonRow}>
+            <Pressable style={styles.button} onPress={() => void onDismiss()}>
+              <Text style={styles.buttonNeutral}>지금 사용해보기</Text>
+            </Pressable>
+            <View style={styles.verticalHairline} />
+            <Pressable style={styles.button} onPress={() => void onUpgrade()}>
+              <Text style={styles.buttonPrimary}>요금제 보기</Text>
+            </Pressable>
           </View>
-          <Pressable style={styles.primary} onPress={() => void onDismiss()}>
-            <Text style={styles.primaryText}>지금 사용해보기</Text>
-          </Pressable>
-          <Pressable style={styles.secondary} onPress={() => void onUpgrade()}>
-            <Text style={styles.secondaryText}>요금제 자세히 보기</Text>
-          </Pressable>
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 };
 
-const Feature: React.FC<{ text: string }> = ({ text }) => (
-  <View style={styles.featureRow}>
-    <Text style={styles.featureBullet}>•</Text>
-    <Text style={styles.featureText}>{text}</Text>
-  </View>
-);
-
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
     justifyContent: 'center',
-    paddingHorizontal: 28,
+    paddingHorizontal: 40,
   },
   card: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    padding: 24,
-    alignItems: 'center',
-  },
-  heart: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#FFF1E6',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  heartText: { fontSize: 30 },
-  title: {
-    fontSize: 19,
-    fontWeight: '700',
-    color: '#111111',
-    marginBottom: 8,
-    textAlign: 'center',
+    borderRadius: 14,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowOffset: { width: 0, height: 4 },
+    shadowRadius: 12,
+    overflow: 'hidden',
   },
   body: {
-    fontSize: 14,
-    color: '#555555',
+    paddingHorizontal: 20,
+    paddingTop: 22,
+    paddingBottom: 20,
+    alignItems: 'center',
+  },
+  title: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111111',
+    letterSpacing: -0.2,
     textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 16,
   },
-  featureBox: {
-    width: '100%',
-    backgroundColor: '#F5F5F7',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    marginBottom: 18,
+  subtitle: {
+    fontSize: 13,
+    color: '#666666',
+    textAlign: 'center',
+    marginTop: 8,
+    lineHeight: 19,
+    letterSpacing: -0.1,
   },
-  featureRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 4 },
-  featureBullet: { color: '#0066FF', marginRight: 8, fontSize: 14 },
-  featureText: { flex: 1, fontSize: 13, color: '#333333', lineHeight: 18 },
-  primary: {
-    width: '100%',
-    paddingVertical: 13,
-    backgroundColor: '#0066FF',
-    borderRadius: 10,
+  hairline: { height: 1, backgroundColor: '#E5E5E5' },
+  verticalHairline: { width: 1, backgroundColor: '#E5E5E5' },
+  buttonRow: { flexDirection: 'row', height: 46 },
+  button: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
   },
-  primaryText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
-  secondary: {
-    width: '100%',
-    paddingVertical: 11,
-    alignItems: 'center',
-    marginTop: 6,
-  },
-  secondaryText: { color: '#666666', fontSize: 13 },
+  buttonNeutral: { fontSize: 15, color: '#666666' },
+  buttonPrimary: { fontSize: 15, fontWeight: '700', color: '#0066FF' },
 });

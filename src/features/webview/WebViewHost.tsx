@@ -144,74 +144,151 @@ export const WebViewHost: React.FC = () => {
     return () => sub.remove();
   }, []);
 
-  // API client emits this when a request returns 401 or the cached JWT is
-  // about to expire. The WebView is the auth source of truth (Supabase JS
-  // SDK lives here and auto-refreshes); we inject a script that either:
-  //   1) calls a bridge hook the web team exposes, or
-  //   2) calls Supabase JS directly if it's available on `window`, or
-  //   3) falls back to reloading the WebView so bridge.js re-posts auth.login
-  //      from the freshly-loaded Supabase session.
-  // Whichever path runs, the eventual `auth.login` bridge message wakes the
-  // waiter in session.ts → the failed API call retries with the new JWT.
+  // === SESSION REFRESH (MAX STRENGTH) ===========================
+  //
+  // The WebView's Supabase JS SDK is the auth source of truth — it auto-
+  // refreshes access_token periodically and persists to localStorage under
+  // "sb-<project>-auth-token". RN's in-memory cache rots when the app sits
+  // idle for hours then gets revived by a native trigger (PostCallScan /
+  // CallScreening / overlay tap), so we must aggressively re-sync.
+  //
+  // Strategy: when refresh is requested, fire EVERY recovery path in
+  // parallel and accept whichever delivers first:
+  //   1) Inject JS that reads Supabase session from localStorage and
+  //      re-posts auth.login. Almost instant (<50ms) if WebView is loaded.
+  //   2) Inject JS that calls Supabase refreshSession() to force a new
+  //      access_token (in case localStorage is also stale).
+  //   3) Hard reload WebView so bridge.js handshake re-publishes auth.login
+  //      from scratch. Slower (~2-3s) but always works.
+  //
+  // Caller (api/client.ts) waits up to 20 seconds — the longest path is
+  // the reload which usually finishes in ~3s.
+  const injectSessionRefresh = useCallback(() => {
+    const ref = webViewRef.current;
+    if (!ref) return;
+    // (1) + (2): try localStorage AND Supabase refresh in the same script.
+    ref.injectJavaScript(`
+      (function() {
+        var post = function(s) {
+          if (!s || !s.access_token) return false;
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'auth.login',
+            payload: {
+              accessToken: s.access_token,
+              refreshToken: s.refresh_token,
+              userId: s.user && s.user.id,
+              email: s.user && s.user.email,
+              expiresAt: s.expires_at,
+            }
+          }));
+          return true;
+        };
+        try {
+          // Path A: localStorage read (fast — works if Supabase JS is alive)
+          var keys = Object.keys(localStorage || {});
+          var localHit = null;
+          for (var i = 0; i < keys.length; i++) {
+            var k = keys[i];
+            if (k.indexOf('sb-') !== 0 || k.indexOf('-auth-token') < 0) continue;
+            var raw = localStorage.getItem(k);
+            if (!raw) continue;
+            try { localHit = JSON.parse(raw); } catch (e) {}
+            if (localHit && localHit.access_token) {
+              post(localHit);
+              break;
+            }
+          }
+          // Path B: force-refresh via Supabase JS if reachable globally
+          var sb = window.supabase || window.supabaseClient || window._supabase
+                 || (window.YoungmanBridge && window.YoungmanBridge.supabase);
+          if (sb && sb.auth && typeof sb.auth.refreshSession === 'function') {
+            sb.auth.refreshSession().then(function(r) {
+              var s = r && r.data && r.data.session;
+              if (s) post(s);
+            }).catch(function() {});
+          }
+          // Path C: ask web-team bridge hook if it exists
+          if (window.YoungmanBridge && typeof window.YoungmanBridge.refreshSession === 'function') {
+            try { window.YoungmanBridge.refreshSession(); } catch (e) {}
+          }
+        } catch (e) {
+          // swallow — caller has reload fallback
+        }
+      })();
+      true;
+    `);
+    // (3): hard reload — fires unconditionally so a stale page (Supabase JS
+    // dead, localStorage empty) still recovers. Reloading is idempotent and
+    // bridge.js republishes auth.login on every load, so even when paths
+    // (1)/(2) succeed, the redundant reload at most refreshes the WebView
+    // page once. We minimize the user's perception by deferring 1s — if
+    // localStorage read works, the API retry kicks off well before reload
+    // completes anyway.
+    const counterAtRequest = sessionUpdateCounterRef.current;
+    setTimeout(() => {
+      if (sessionUpdateCounterRef.current !== counterAtRequest) {
+        return; // a fresh auth.login already arrived — skip reload
+      }
+      if (__DEV__) {
+        console.log('[Session] hard fallback — reloading WebView');
+      }
+      webViewRef.current?.reload();
+    }, 1_000);
+  }, []);
+
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener(
       SESSION_REFRESH_REQUEST_EVENT,
       () => {
         if (__DEV__) {
-          console.log('[Session] refresh requested — injecting');
+          console.log('[Session] refresh requested — firing all paths');
         }
-        webViewRef.current?.injectJavaScript(`
-          (function() {
-            try {
-              if (window.__bridge && typeof window.__bridge.requestSessionRefresh === 'function') {
-                window.__bridge.requestSessionRefresh();
-                return;
-              }
-              var sb = window.supabase || window.supabaseClient || window._supabase;
-              if (sb && sb.auth && typeof sb.auth.refreshSession === 'function') {
-                sb.auth.refreshSession().then(function(r) {
-                  var s = r && r.data && r.data.session;
-                  if (!s) return;
-                  window.ReactNativeWebView.postMessage(JSON.stringify({
-                    type: 'auth.login',
-                    payload: {
-                      accessToken: s.access_token,
-                      refreshToken: s.refresh_token,
-                      userId: s.user && s.user.id,
-                      email: s.user && s.user.email,
-                      expiresAt: s.expires_at,
-                    }
-                  }));
-                });
-                return;
-              }
-            } catch (e) {
-              // ignore — final fallback is the reload() below
-            }
-          })();
-          true;
-        `);
-        // Hard fallback: if neither the bridge hook nor a global Supabase
-        // client delivered a fresh auth.login, reload the WebView. Page
-        // boot path always re-publishes auth.login as part of the bridge
-        // handshake, so reload reliably restores tokens — at the cost of
-        // wiping any in-WebView state (form drafts, scroll position).
-        const counterAtRequest = sessionUpdateCounterRef.current;
-        setTimeout(() => {
-          if (sessionUpdateCounterRef.current !== counterAtRequest) {
-            // Inline path already delivered a fresh auth.login — skip reload
-            // so the user keeps their WebView state.
-            return;
-          }
-          if (__DEV__) {
-            console.log('[Session] fallback — reloading WebView');
-          }
-          webViewRef.current?.reload();
-        }, 3_000);
+        injectSessionRefresh();
       },
     );
     return () => sub.remove();
-  }, []);
+  }, [injectSessionRefresh]);
+
+  // Whenever the WebView finishes loading, pre-emptively pull the current
+  // Supabase session out of localStorage. This keeps RN's cache fresh
+  // *before* any 401 ever happens — covers the cold-start case where a
+  // native trigger (post-call modal tap) revives a stale AsyncStorage
+  // token while the WebView quietly loads in the background.
+  useEffect(() => {
+    if (!webViewReady) return;
+    if (__DEV__) {
+      console.log('[Session] WebView ready — pulling localStorage session');
+    }
+    // Just the read path — don't reload here (we just finished loading).
+    webViewRef.current?.injectJavaScript(`
+      (function() {
+        try {
+          var keys = Object.keys(localStorage || {});
+          for (var i = 0; i < keys.length; i++) {
+            var k = keys[i];
+            if (k.indexOf('sb-') !== 0 || k.indexOf('-auth-token') < 0) continue;
+            var raw = localStorage.getItem(k);
+            if (!raw) continue;
+            var s;
+            try { s = JSON.parse(raw); } catch (e) { continue; }
+            if (!s || !s.access_token) continue;
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'auth.login',
+              payload: {
+                accessToken: s.access_token,
+                refreshToken: s.refresh_token,
+                userId: s.user && s.user.id,
+                email: s.user && s.user.email,
+                expiresAt: s.expires_at,
+              }
+            }));
+            return;
+          }
+        } catch (e) {}
+      })();
+      true;
+    `);
+  }, [webViewReady]);
 
   const onNavigationStateChange = useCallback((nav: WebViewNavigation) => {
     setCanGoBack(nav.canGoBack);

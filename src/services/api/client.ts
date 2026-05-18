@@ -58,10 +58,21 @@ function requestSessionRefresh(): void {
 }
 
 /** Wait at most `timeoutMs` for the WebView to post `auth.login`. Returns
- *  true if the session was updated (so the caller may retry). */
-async function tryRefreshSession(timeoutMs: number = 8_000): Promise<boolean> {
+ *  true if the session was updated (so the caller may retry).
+ *
+ *  Max strength: 20s allows the slowest path (full WebView reload + page
+ *  load + bridge handshake) to complete on a slow network. localStorage
+ *  read path usually wins in <100ms; this timeout is the safety net for
+ *  cold-start scenarios where the WebView wasn't loaded yet. */
+async function tryRefreshSession(timeoutMs: number = 20_000): Promise<boolean> {
+  if (__DEV__) {
+    console.log('[api] 401 → requesting session refresh');
+  }
   requestSessionRefresh();
   const next = await waitForSessionUpdate(timeoutMs);
+  if (__DEV__) {
+    console.log('[api] session refresh result:', next ? 'fresh' : 'timeout');
+  }
   return next != null;
 }
 
@@ -69,16 +80,21 @@ async function tryRefreshSession(timeoutMs: number = 8_000): Promise<boolean> {
  *  Best-effort — caller can ignore the return. */
 async function maybeProactiveRefresh(): Promise<void> {
   if (!isSessionExpiringSoon(60_000)) return;
-  await tryRefreshSession(5_000);
+  await tryRefreshSession(10_000);
 }
 
 interface RequestOptions {
-  /** Internal — prevents infinite recursion when a retry also gets 401. */
-  _retried?: boolean;
+  /** Internal — counts retry attempts. Allow up to 2 retries (initial +
+   *  2 refresh attempts) before giving up. Each retry re-requests session
+   *  refresh, so a transient WebView load delay on the first attempt can
+   *  still recover on the second. */
+  _retryCount?: number;
 }
 
+const MAX_RETRIES = 2;
+
 export async function apiGet<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  if (!opts._retried) {
+  if (!opts._retryCount) {
     await maybeProactiveRefresh();
   }
   const token = requireToken();
@@ -101,9 +117,9 @@ export async function apiGet<T>(path: string, opts: RequestOptions = {}): Promis
       JSON.stringify(parsed).slice(0, 800),
     );
   }
-  if (res.status === 401 && !opts._retried) {
+  if (res.status === 401 && (opts._retryCount ?? 0) < MAX_RETRIES) {
     if (await tryRefreshSession()) {
-      return apiGet<T>(path, { _retried: true });
+      return apiGet<T>(path, { _retryCount: (opts._retryCount ?? 0) + 1 });
     }
   }
   if (!res.ok) {
@@ -123,7 +139,7 @@ export async function apiPost<T>(
   body: unknown,
   opts: RequestOptions = {},
 ): Promise<T> {
-  if (!opts._retried) {
+  if (!opts._retryCount) {
     await maybeProactiveRefresh();
   }
   const token = requireToken();
@@ -150,9 +166,11 @@ export async function apiPost<T>(
       JSON.stringify(parsed).slice(0, 800),
     );
   }
-  if (res.status === 401 && !opts._retried) {
+  if (res.status === 401 && (opts._retryCount ?? 0) < MAX_RETRIES) {
     if (await tryRefreshSession()) {
-      return apiPost<T>(path, body, { _retried: true });
+      return apiPost<T>(path, body, {
+        _retryCount: (opts._retryCount ?? 0) + 1,
+      });
     }
   }
   if (!res.ok) {
@@ -172,7 +190,7 @@ export async function apiPostMultipart<T>(
   form: FormData,
   opts: RequestOptions = {},
 ): Promise<T> {
-  if (!opts._retried) {
+  if (!opts._retryCount) {
     await maybeProactiveRefresh();
   }
   const token = requireToken();
@@ -197,9 +215,11 @@ export async function apiPostMultipart<T>(
       JSON.stringify(parsed).slice(0, 800),
     );
   }
-  if (res.status === 401 && !opts._retried) {
+  if (res.status === 401 && (opts._retryCount ?? 0) < MAX_RETRIES) {
     if (await tryRefreshSession()) {
-      return apiPostMultipart<T>(path, form, { _retried: true });
+      return apiPostMultipart<T>(path, form, {
+        _retryCount: (opts._retryCount ?? 0) + 1,
+      });
     }
   }
   if (!res.ok) {

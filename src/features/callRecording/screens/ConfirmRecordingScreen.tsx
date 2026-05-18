@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { RootStackParamList } from '../../../navigation/types';
 import { ApiError } from '../../../services/api/client';
 import { isLoggedIn } from '../../../services/auth/session';
+import { assertCanRunSummary } from '../../../services/billing/gating';
 import { lookupContactName } from '../../../services/contacts/lookupContact';
 import { deterministicRequestId } from '../../../shared/uuid';
 import { fetchLedgerGroups } from '../api/records';
@@ -74,6 +75,15 @@ export const ConfirmRecordingScreen: React.FC = () => {
         '영맨 앱을 열고 로그인 후 알림을 다시 눌러주세요.',
         [{ text: '확인', onPress: () => navigation.goBack() }],
       );
+      return;
+    }
+    // Plan gating — bail before burning upload/server credits if the user
+    // can't actually run AI summary right now (Free plan, quota exhausted,
+    // past_due, etc.). The gating helper shows its own Alert and provides
+    // an upgrade deep link.
+    const allowed = await assertCanRunSummary();
+    if (!allowed) {
+      navigation.goBack();
       return;
     }
     try {

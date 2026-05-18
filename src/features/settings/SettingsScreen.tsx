@@ -2,6 +2,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  DeviceEventEmitter,
   Linking,
   Pressable,
   ScrollView,
@@ -14,6 +15,13 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { RootStackParamList } from '../../navigation/types';
+import {
+  BILLING_PROFILE_UPDATED_EVENT,
+  ensureFreshProfile,
+  getCachedProfile,
+  usageDisplayString,
+} from '../../services/billing/billingStore';
+import type { AuthProfile } from '../../services/billing/api';
 import {
   DEFAULT_SETTINGS,
   type AppSettings,
@@ -64,6 +72,9 @@ export const SettingsScreen: React.FC = () => {
     DEFAULT_SETTINGS.keywords,
   );
   const [screeningRoleHeld, setScreeningRoleHeld] = useState<boolean>(false);
+  const [profile, setProfile] = useState<AuthProfile | null>(
+    getCachedProfile(),
+  );
 
   useEffect(() => {
     (async () => {
@@ -71,7 +82,21 @@ export const SettingsScreen: React.FC = () => {
       setSettings(s);
       setKeywordsDraft(s.keywords);
       setScreeningRoleHeld(await isCallScreeningRoleHeld());
+      // Refresh plan/usage so the indicator on this screen matches reality —
+      // user may have just upgraded or used their last summary.
+      const fresh = await ensureFreshProfile();
+      if (fresh) setProfile(fresh);
     })();
+  }, []);
+
+  // Subscribe to billing updates — covers the case where the user upgrades
+  // via /billing.html?success=1 while this screen is open in the background.
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(
+      BILLING_PROFILE_UPDATED_EVENT,
+      (p: AuthProfile) => setProfile(p),
+    );
+    return () => sub.remove();
   }, []);
 
   // Re-check the screener role whenever the screen comes back into view —
@@ -85,9 +110,17 @@ export const SettingsScreen: React.FC = () => {
 
   const onOpenBilling = useCallback(() => {
     // Hand off to WebViewHost via deep link. The host pops back to the
-    // root WebView screen and navigates the WebView to /billing where the
-    // web team renders the plan + subscription management page.
+    // root WebView screen and navigates the WebView to /billing.html where
+    // the web team renders the plan + subscription management page.
     void Linking.openURL('youngman://record/billing');
+  }, []);
+
+  const onOpenSubscribe = useCallback(() => {
+    void Linking.openURL('youngman://record/subscribe');
+  }, []);
+
+  const onOpenPolicy = useCallback((page: string) => {
+    void Linking.openURL(`youngman://record/policy?page=${page}`);
   }, []);
 
   const onRequestScreening = useCallback(async () => {
@@ -120,17 +153,30 @@ export const SettingsScreen: React.FC = () => {
       <ScrollView contentContainerStyle={styles.body}>
         <Section
           title="내 플랜 / 구독 관리"
-          footer="구독 시스템 준비 중입니다. 출시 후 결제와 사용량을 이 화면에서 관리할 수 있어요."
+          footer={planSectionFooter(profile)}
         >
           <Pressable style={styles.row} onPress={onOpenBilling}>
             <View style={styles.rowText}>
-              <Text style={styles.rowLabel}>플랜 보기</Text>
+              <Text style={styles.rowLabel}>{planRowLabel(profile)}</Text>
               <Text style={styles.rowHint}>
-                현재 무료 체험 / 결제 정보 확인
+                {usageDisplayString(profile) ?? '결제 정보 확인'}
               </Text>
             </View>
             <Text style={styles.rowCheck}>›</Text>
           </Pressable>
+          {shouldShowUpgrade(profile) && (
+            <Pressable style={styles.row} onPress={onOpenSubscribe}>
+              <View style={styles.rowText}>
+                <Text style={[styles.rowLabel, styles.rowLabelAccent]}>
+                  요금제 비교 / 업그레이드
+                </Text>
+                <Text style={styles.rowHint}>
+                  Plus 월 19,000원 · Pro 월 39,000원
+                </Text>
+              </View>
+              <Text style={styles.rowCheck}>›</Text>
+            </Pressable>
+          )}
         </Section>
 
         <Section title="모달 자동 닫힘 시간">
@@ -229,11 +275,81 @@ export const SettingsScreen: React.FC = () => {
           </Pressable>
         </Section>
 
+        <Section
+          title="약관 / 정책"
+          footer="어센트라(Ascentra) · 사업자등록번호 393-39-01518 · 대표 장동훈 · 경기도 화성시 효행로 30, 202호 · nxnxax@gmail.com"
+        >
+          <PolicyRow label="이용약관" onPress={() => onOpenPolicy('terms')} />
+          <PolicyRow
+            label="개인정보처리방침"
+            onPress={() => onOpenPolicy('privacy')}
+          />
+          <PolicyRow label="환불정책" onPress={() => onOpenPolicy('refund')} />
+          <PolicyRow
+            label="자동결제 안내"
+            onPress={() => onOpenPolicy('auto-billing')}
+          />
+        </Section>
+
         <View style={styles.spacer} />
       </ScrollView>
     </SafeAreaView>
   );
 };
+
+// === plan helpers ===================================================
+
+function planLabel(profile: AuthProfile | null): string {
+  if (!profile) return '플랜 정보 확인 중…';
+  switch (profile.plan) {
+    case 'free':
+      return 'Free 플랜';
+    case 'plus':
+      return 'Plus 플랜';
+    case 'pro':
+      return 'Pro 플랜';
+    case 'premium':
+      // Legacy users grandfathered from pre-PortOne — treat as Pro.
+      return 'Pro 플랜';
+    case 'trialing':
+      return '무료 체험 중';
+    default:
+      return '플랜 정보 확인 중…';
+  }
+}
+
+function planRowLabel(profile: AuthProfile | null): string {
+  return `현재 플랜 · ${planLabel(profile)}`;
+}
+
+function planSectionFooter(profile: AuthProfile | null): string {
+  if (!profile) return '결제 시스템 연결 중입니다.';
+  if (profile.plan_status === 'past_due') {
+    return '결제가 처리되지 않았습니다. 결제 정보를 업데이트해주세요.';
+  }
+  if (profile.plan_status === 'cancelled') {
+    if (profile.current_period_end) {
+      return `해지 예정 — ${profile.current_period_end}까지 사용 가능`;
+    }
+    return '구독이 해지되었습니다.';
+  }
+  if (profile.plan === 'free' || profile.plan === 'trialing') {
+    return 'Plus 또는 Pro 구독으로 통화 AI 요약을 사용할 수 있어요.';
+  }
+  if (profile.current_period_end) {
+    return `다음 결제일 · ${profile.current_period_end}`;
+  }
+  return '';
+}
+
+function shouldShowUpgrade(profile: AuthProfile | null): boolean {
+  if (!profile) return false;
+  // Show upgrade CTA whenever the user is not already on Pro and not in a
+  // past_due/cancelled state where they need to fix billing first.
+  if (profile.plan === 'pro' || profile.plan === 'premium') return false;
+  if (profile.plan_status === 'past_due') return false;
+  return true;
+}
 
 interface SectionProps {
   title: string;
@@ -263,6 +379,20 @@ const Row: React.FC<RowProps> = ({ label, hint, selected, onPress }) => (
       {hint && <Text style={styles.rowHint}>{hint}</Text>}
     </View>
     {selected && <Text style={styles.rowCheck}>✓</Text>}
+  </Pressable>
+);
+
+interface PolicyRowProps {
+  label: string;
+  onPress: () => void;
+}
+
+const PolicyRow: React.FC<PolicyRowProps> = ({ label, onPress }) => (
+  <Pressable style={styles.row} onPress={onPress}>
+    <View style={styles.rowText}>
+      <Text style={styles.rowLabel}>{label}</Text>
+    </View>
+    <Text style={styles.rowCheck}>›</Text>
   </Pressable>
 );
 
@@ -322,6 +452,7 @@ const styles = StyleSheet.create({
   },
   rowText: { flex: 1 },
   rowLabel: { fontSize: 15, color: '#111111' },
+  rowLabelAccent: { color: '#0066FF', fontWeight: '600' },
   rowHint: { fontSize: 12, color: '#888888', marginTop: 3 },
   rowCheck: { fontSize: 16, color: '#0066FF', fontWeight: '700' },
   keywordBlock: {

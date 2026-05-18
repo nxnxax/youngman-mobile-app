@@ -16,6 +16,7 @@ import type { RootStackParamList } from '../../navigation/types';
 import { CUSTOMERS_PATH, USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/env';
 import { SESSION_REFRESH_REQUEST_EVENT } from '../../services/api/client';
 import { isLoggedIn } from '../../services/auth/session';
+import { refreshProfile as refreshBillingProfile } from '../../services/billing/billingStore';
 import { BackgroundPermissionBanner } from '../callRecording/components/BackgroundPermissionBanner';
 import { PendingReminderModal } from '../callRecording/components/PendingReminderModal';
 import { triggerCatchUpScan } from '../callRecording/scanner/recordingScanner';
@@ -81,12 +82,33 @@ export const WebViewHost: React.FC = () => {
         return true;
       }
       if (route.pathname === 'billing') {
-        // Settings → "내 플랜 관리" path. Pop any modal screens, then
-        // navigate the WebView to /billing. Web team owns the page;
-        // until they ship it the user may see a 404 — that's expected
-        // during the integration window.
+        // Settings → "내 플랜 관리" path. cafe24 webroot is flat — `.html`
+        // extension is mandatory (no extensionless rewrite).
         navigation.popToTop();
-        const target = `${WEB_BASE_URL}/billing`;
+        const target = `${WEB_BASE_URL}/billing.html`;
+        webViewRef.current?.injectJavaScript(
+          `window.location.href = ${JSON.stringify(target)}; true;`,
+        );
+        return true;
+      }
+      if (route.pathname === 'subscribe') {
+        // Plan comparison + checkout entry — currently used by the
+        // "체험 X회 남음" upgrade prompt and the upgrade CTAs in the gating
+        // modals.
+        navigation.popToTop();
+        const target = `${WEB_BASE_URL}/subscribe.html`;
+        webViewRef.current?.injectJavaScript(
+          `window.location.href = ${JSON.stringify(target)}; true;`,
+        );
+        return true;
+      }
+      if (route.pathname === 'policy') {
+        // Generic policy-page jumper. ?page=terms|privacy|refund|auto-billing
+        const page = route.params.page;
+        const allowed = ['terms', 'privacy', 'refund', 'auto-billing'];
+        if (!allowed.includes(page)) return false;
+        navigation.popToTop();
+        const target = `${WEB_BASE_URL}/${page}.html`;
         webViewRef.current?.injectJavaScript(
           `window.location.href = ${JSON.stringify(target)}; true;`,
         );
@@ -195,6 +217,19 @@ export const WebViewHost: React.FC = () => {
     setCanGoBack(nav.canGoBack);
     if (__DEV__) {
       console.log('[WebView nav]', nav.url);
+    }
+    // PortOne 결제 성공 → web team's verify-payment.php → redirect to
+    // /billing.html?success=1. Detect this and refresh the plan cache so
+    // gating modals + usage indicators flip to the new plan immediately,
+    // without waiting for the next AppState 'active' tick.
+    if (
+      nav.url.includes('/billing.html') &&
+      /[?&]success=1\b/.test(nav.url)
+    ) {
+      if (__DEV__) {
+        console.log('[Billing] success URL — refreshing plan');
+      }
+      void refreshBillingProfile();
     }
   }, []);
 

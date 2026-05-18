@@ -13,6 +13,10 @@ import { name as appName } from './app.json';
 import { autoSubmitTask } from './src/features/callRecording/headless/autoSubmitTask';
 import { syncLedgerGroupsToNative } from './src/features/callRecording/services/ledgerGroupsSync';
 import { isLoggedIn, restoreSession } from './src/services/auth/session';
+import {
+  attachBillingLifecycle,
+  refreshProfile as refreshBillingProfile,
+} from './src/services/billing/billingStore';
 import { handleFcmMessage } from './src/services/fcm/handleFcmMessage';
 import { registerFcmTokenWithServer } from './src/services/fcm/registerFcmToken';
 import { installGlobalErrorHandler } from './src/services/logger/errorLog';
@@ -36,8 +40,13 @@ void syncSettingsToNative();
 void restoreSession().then(() => {
   if (isLoggedIn()) {
     void syncLedgerGroupsToNative();
+    void refreshBillingProfile();
   }
 });
+
+// Wire the billing cache to AppState lifecycle. Idempotent — safe to call
+// even before the session restore above completes.
+attachBillingLifecycle();
 
 // Re-register on FCM token rotation. The handler bails when not logged in,
 // so it is safe even before the session restore above completes.

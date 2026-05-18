@@ -22,6 +22,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { RootStackParamList } from '../../../navigation/types';
+import {
+  ensureFreshProfile,
+  evaluateSummaryGate,
+  getCachedProfile,
+} from '../../../services/billing/billingStore';
+import { gateCopy } from '../../../services/billing/gating';
 import { processRecording } from '../api/processRecording';
 import { sendCustomerLogToGroup } from '../api/records';
 import type {
@@ -148,11 +154,17 @@ export const SummaryReviewScreen: React.FC = () => {
         if (cancelled) return;
         setProcessing(false);
         if (e instanceof ApiError && e.code === 'plan_required') {
-          Alert.alert(
-            'Premium 구독이 필요해요',
-            '무료 체험 횟수가 끝났습니다.',
-            [{ text: '확인', onPress: () => navigation.popToTop() }],
-          );
+          // Defense-in-depth: pre-call gating in ConfirmRecording should
+          // have caught this, but the user's quota may have shifted in
+          // the gap between screens. Refresh the profile and use the
+          // same gating copy as the entry-level check so the messages
+          // are consistent.
+          await ensureFreshProfile();
+          const gate = evaluateSummaryGate(getCachedProfile());
+          const copy = gateCopy(gate, getCachedProfile());
+          Alert.alert(copy.title, copy.body, [
+            { text: '확인', onPress: () => navigation.popToTop() },
+          ]);
           return;
         }
         const msg = e instanceof ApiError ? e.message : String(e);

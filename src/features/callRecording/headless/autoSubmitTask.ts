@@ -1,4 +1,8 @@
 import { restoreSession, isLoggedIn } from '../../../services/auth/session';
+import {
+  ensureFreshProfile,
+  evaluateSummaryGate,
+} from '../../../services/billing/billingStore';
 import { lookupContactName } from '../../../services/contacts/lookupContact';
 import { logError } from '../../../services/logger/errorLog';
 import { hideProgressOverlay } from '../../../services/overlay/progressOverlay';
@@ -41,6 +45,33 @@ export async function autoSubmitTask(
       duration: data.duration,
     });
     return;
+  }
+
+  // Plan gating BEFORE the upload — no point burning Clova/LLM credits if
+  // the server is going to reject with `plan_required` anyway. The headless
+  // task can't pop an Alert (no UI thread) so we just abort silently. The
+  // user gets the same outcome they would from the pre-call dialog: nothing
+  // happens. They'll discover via the Settings indicator the next time
+  // they open the app.
+  //
+  // Fail-open: if profile fetch failed (network glitch), let the upload
+  // run — the server enforces `plan_required` 403 anyway, and we shouldn't
+  // silently drop the recording on transient network failures.
+  const profile = await ensureFreshProfile();
+  if (profile) {
+    const gate = evaluateSummaryGate(profile);
+    if (!gate.allowed) {
+      hideProgressOverlay();
+      if (__DEV__) {
+        console.log('[AutoSubmit] gate closed:', gate.reason);
+      }
+      logError('AutoSubmit', 'plan gate closed', {
+        reason: gate.reason ?? 'unknown',
+        plan: profile.plan,
+        plan_status: profile.plan_status,
+      });
+      return;
+    }
   }
 
   const recordedAt = toIso8601Local(data.dateAdded);

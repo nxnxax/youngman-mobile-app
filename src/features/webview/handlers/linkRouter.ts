@@ -19,6 +19,36 @@ const APP_SCHEMES: ReadonlyArray<string> = [
   'naversearchapp:',
   'line:',
   'fb:',
+  // Korean card-issuer / 간편결제 app schemes for PortOne(포트원)+토스페이먼츠
+  // 3DS / 모바일 인증 step. WebView must hand these off to Linking.openURL —
+  // refusing them breaks payment mid-flow. PoC may reveal additional schemes
+  // (특히 BC카드, 페이북) — add them here.
+  // Cards
+  'kb-acp:',                       // KB국민
+  'mpocket.online.ansimclick:',    // 삼성 / BC 안심클릭 (공유 스킴)
+  'tauthlink:',                    // 삼성 모바일 인증
+  'shinhan-sr-ansimclick:',        // 신한 안심클릭
+  'shinhan-sr-ansimclick-iss:',    // 신한 ISP
+  'hdcardappcardansimclick:',      // 현대카드
+  'smhyundaiansimclick:',          // 현대 SmS 안심클릭
+  'lotteappcard:',                 // 롯데앱카드
+  'lottesmartpay:',                // 롯데 스마트페이
+  'cloudpay:',                     // 하나카드 (클라우드페이)
+  'nhappcardansimclick:',          // NH농협
+  'nonghyupcardansimclick:',       // NH농협 구버전
+  'citispay:',                     // 씨티
+  'citimobileapp:',                // 씨티 모바일앱
+  'wooripay:',                     // 우리페이
+  'newsmartpib:',                  // 우리은행 스마트뱅킹
+  // 공통 인증
+  'ispmobile:',                    // KISA ISP 모바일 (공인)
+  // 간편결제
+  'samsungpay:',                   // 삼성페이
+  'kakaopay:',                     // 카카오페이
+  'payco:',                        // PAYCO
+  'paybooc:',                      // 페이북 (BC카드)
+  'supertoss:',                    // 토스
+  'tswauthticket:',                // 토스 인증
 ];
 
 const DOWNLOAD_EXT_RE =

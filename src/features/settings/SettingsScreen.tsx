@@ -2,6 +2,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -82,6 +83,13 @@ export const SettingsScreen: React.FC = () => {
     return unsub;
   }, [navigation]);
 
+  const onOpenBilling = useCallback(() => {
+    // Hand off to WebViewHost via deep link. The host pops back to the
+    // root WebView screen and navigates the WebView to /billing where the
+    // web team renders the plan + subscription management page.
+    void Linking.openURL('youngman://record/billing');
+  }, []);
+
   const onRequestScreening = useCallback(async () => {
     await requestCallScreeningRole();
     // Refresh — RoleManager dialog returns asynchronously; the focus listener
@@ -110,6 +118,21 @@ export const SettingsScreen: React.FC = () => {
       </View>
 
       <ScrollView contentContainerStyle={styles.body}>
+        <Section
+          title="내 플랜 / 구독 관리"
+          footer="구독 시스템 준비 중입니다. 출시 후 결제와 사용량을 이 화면에서 관리할 수 있어요."
+        >
+          <Pressable style={styles.row} onPress={onOpenBilling}>
+            <View style={styles.rowText}>
+              <Text style={styles.rowLabel}>플랜 보기</Text>
+              <Text style={styles.rowHint}>
+                현재 무료 체험 / 결제 정보 확인
+              </Text>
+            </View>
+            <Text style={styles.rowCheck}>›</Text>
+          </Pressable>
+        </Section>
+
         <Section title="모달 자동 닫힘 시간">
           {DWELL_OPTIONS.map(opt => (
             <Row

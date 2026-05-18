@@ -74,6 +74,18 @@ export const WebViewHost: React.FC = () => {
         navigation.navigate('Settings');
         return true;
       }
+      if (route.pathname === 'billing') {
+        // Settings → "내 플랜 관리" path. Pop any modal screens, then
+        // navigate the WebView to /billing. Web team owns the page;
+        // until they ship it the user may see a 404 — that's expected
+        // during the integration window.
+        navigation.popToTop();
+        const target = `${WEB_BASE_URL}/billing`;
+        webViewRef.current?.injectJavaScript(
+          `window.location.href = ${JSON.stringify(target)}; true;`,
+        );
+        return true;
+      }
       return false;
     },
     [navigation],

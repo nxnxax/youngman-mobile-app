@@ -13,15 +13,12 @@ import { name as appName } from './app.json';
 import { autoSubmitTask } from './src/features/callRecording/headless/autoSubmitTask';
 import { syncLedgerGroupsToNative } from './src/features/callRecording/services/ledgerGroupsSync';
 import { isLoggedIn, restoreSession } from './src/services/auth/session';
+import { handleFcmMessage } from './src/services/fcm/handleFcmMessage';
 import { registerFcmTokenWithServer } from './src/services/fcm/registerFcmToken';
 import { installGlobalErrorHandler } from './src/services/logger/errorLog';
 import { syncSettingsToNative } from './src/services/settings/settings';
 
-setBackgroundMessageHandler(getMessaging(), async remoteMessage => {
-  if (__DEV__) {
-    console.log('[FCM] background message', remoteMessage);
-  }
-});
+setBackgroundMessageHandler(getMessaging(), handleFcmMessage);
 
 // Catch uncaught JS errors and persist them to disk so we can inspect later
 // even if Metro / USB was not connected when the error happened.

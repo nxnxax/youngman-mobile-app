@@ -1,8 +1,35 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { NativeModules, Platform } from 'react-native';
 
 import type { AuthLoginPayload } from '../../features/webview/bridge/messageHandler';
 
 const STORAGE_KEY = '@youngman/auth-session-v1';
+
+interface NativeAuthBridge {
+  writeJwt(token: string): Promise<void>;
+  clearJwt(): Promise<void>;
+}
+
+const authNative = (NativeModules as { AuthBridge?: NativeAuthBridge })
+  .AuthBridge;
+
+/** Mirror the JWT into native SharedPreferences so CallScreeningService and
+ *  other native components can do authenticated HTTP without the RN bridge.
+ *  Silent no-op on iOS / when module missing. */
+function syncToNative(token: string | null): void {
+  if (Platform.OS !== 'android' || !authNative) return;
+  void (async () => {
+    try {
+      if (token) {
+        await authNative.writeJwt(token);
+      } else {
+        await authNative.clearJwt();
+      }
+    } catch {
+      // ignore — native cache is best-effort
+    }
+  })();
+}
 
 let current: AuthLoginPayload | null = null;
 
@@ -23,11 +50,13 @@ function persist(value: AuthLoginPayload | null): void {
 export function setSession(auth: AuthLoginPayload): void {
   current = auth;
   persist(auth);
+  syncToNative(auth.accessToken);
 }
 
 export function clearSession(): void {
   current = null;
   persist(null);
+  syncToNative(null);
 }
 
 export function getAccessToken(): string | null {
@@ -63,6 +92,9 @@ export async function restoreSession(): Promise<boolean> {
     const parsed = JSON.parse(raw) as AuthLoginPayload;
     if (parsed && typeof parsed.accessToken === 'string') {
       current = parsed;
+      // Make sure the native cache is fresh after a process restart —
+      // otherwise CallScreeningService could be using a stale or empty JWT.
+      syncToNative(parsed.accessToken);
       return true;
     }
   } catch {

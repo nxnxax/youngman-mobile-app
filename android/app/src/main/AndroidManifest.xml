@@ -85,6 +85,18 @@
         </intent-filter>
       </receiver>
 
+      <!-- Optional caller-ID role. Only fires when the user picks Youngman in
+           Settings → Default apps → Caller ID & spam. Used to surface the
+           in-call customer-info banner before the call is answered. -->
+      <service
+          android:name=".telephony.YoungmanCallScreeningService"
+          android:permission="android.permission.BIND_SCREENING_SERVICE"
+          android:exported="true">
+        <intent-filter>
+            <action android:name="android.telecom.CallScreeningService" />
+        </intent-filter>
+      </service>
+
       <service
           android:name=".telephony.PostCallScanService"
           android:foregroundServiceType="dataSync"
@@ -100,6 +112,10 @@
 
       <service
           android:name=".overlay.ProgressOverlayService"
+          android:exported="false" />
+
+      <service
+          android:name=".overlay.IncomingCallOverlayService"
           android:exported="false" />
 
       <service

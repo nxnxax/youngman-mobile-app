@@ -3,13 +3,14 @@ import type {
   NativeStackNavigationProp,
   RouteProp,
 } from '@react-navigation/native-stack';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   DeviceEventEmitter,
   KeyboardAvoidingView,
   Modal,
+  NativeModules,
   Platform,
   Pressable,
   ScrollView,
@@ -21,6 +22,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { RootStackParamList } from '../../../navigation/types';
+import { processRecording } from '../api/processRecording';
 import { sendCustomerLogToGroup } from '../api/records';
 import type {
   CustomerLogPatch,
@@ -55,6 +57,14 @@ function rowToFormValues(row: CustomerLogRow): Record<string, string> {
   return out;
 }
 
+function emptyFormValues(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of FIELDS) {
+    out[f.key] = '';
+  }
+  return out;
+}
+
 function diff(
   original: Record<string, string>,
   current: Record<string, string>,
@@ -74,32 +84,107 @@ function diff(
 export const SummaryReviewScreen: React.FC = () => {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Route>();
-  const initialRow = route.params.customerLog;
-  const availableGroups: ReadonlyArray<LedgerGroup> =
-    route.params.availableGroups ?? [];
-  const original = useMemo(() => rowToFormValues(initialRow), [initialRow]);
+  const params = route.params;
+  const availableGroups: ReadonlyArray<LedgerGroup> = params.availableGroups ?? [];
+
+  // The form is in one of two modes:
+  //  - "ready": customerLog was passed in (history → review, demo flow).
+  //  - "pending": ConfirmRecording uploaded the audio and handed off the
+  //    job to us. We run processRecording here so the user sees the form
+  //    screen during the ~7s wait instead of staring at a ConfirmRecording
+  //    spinner.
+  const [customerLog, setCustomerLog] = useState<CustomerLogRow | null>(
+    params.customerLog ?? null,
+  );
+  const [processing, setProcessing] = useState<boolean>(
+    params.pendingJob !== undefined && params.customerLog === undefined,
+  );
+  // Tick during processing so we can rotate "AI 분석 중" → "거의 다 됐어요"
+  // after 5s. Same UX trick as the old ConfirmRecording, just relocated.
+  const [processingElapsedMs, setProcessingElapsedMs] = useState(0);
+
+  const original = useMemo(
+    () => (customerLog ? rowToFormValues(customerLog) : emptyFormValues()),
+    [customerLog],
+  );
   const [values, setValues] = useState<Record<string, string>>(original);
+  // Track whether the user has typed into the form yet — if they have, we
+  // must NOT clobber their edits when processRecording finishes. (Unlikely
+  // since fields are blank during processing, but cheap to guard.)
+  const userEditedRef = useRef(false);
   const [saving, setSaving] = useState(false);
   const [groupId, setGroupId] = useState<string | null>(() => {
-    if (route.params.groupId !== undefined) {
-      return route.params.groupId;
+    if (params.groupId !== undefined) {
+      return params.groupId;
     }
-    const main = (route.params.availableGroups ?? []).find(g => g.is_main);
+    const main = availableGroups.find((g: LedgerGroup) => g.is_main);
     return main?.id ?? null;
   });
   const [groupPickerOpen, setGroupPickerOpen] = useState(false);
+  const startedRef = useRef(false);
 
   useEffect(() => {
-    if (__DEV__) {
-      console.log('[SummaryReview] customer_log.id', initialRow.id);
+    if (__DEV__ && customerLog) {
+      console.log('[SummaryReview] customer_log.id', customerLog.id);
     }
-  }, [initialRow.id]);
+  }, [customerLog]);
+
+  // Kick off processRecording exactly once when we land in pending mode.
+  useEffect(() => {
+    if (!params.pendingJob || customerLog) return;
+    if (startedRef.current) return;
+    startedRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await processRecording(params.pendingJob!);
+        if (cancelled) return;
+        setCustomerLog(res.customer_log);
+        if (!userEditedRef.current) {
+          setValues(rowToFormValues(res.customer_log));
+        }
+        setProcessing(false);
+      } catch (e) {
+        if (cancelled) return;
+        setProcessing(false);
+        if (e instanceof ApiError && e.code === 'plan_required') {
+          Alert.alert(
+            'Premium 구독이 필요해요',
+            '무료 체험 횟수가 끝났습니다.',
+            [{ text: '확인', onPress: () => navigation.popToTop() }],
+          );
+          return;
+        }
+        const msg = e instanceof ApiError ? e.message : String(e);
+        Alert.alert('처리 실패', msg, [
+          { text: '확인', onPress: () => navigation.popToTop() },
+        ]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!processing) {
+      setProcessingElapsedMs(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const id = setInterval(() => {
+      setProcessingElapsedMs(Date.now() - startedAt);
+    }, 500);
+    return () => clearInterval(id);
+  }, [processing]);
 
   const dirty = useMemo(() => {
     return Object.keys(diff(original, values)).length > 0;
   }, [original, values]);
 
   const updateField = useCallback((key: string, val: string) => {
+    userEditedRef.current = true;
     setValues(v => ({ ...v, [key]: val }));
   }, []);
 
@@ -112,11 +197,12 @@ export const SummaryReviewScreen: React.FC = () => {
   }, [availableGroups, groupId]);
 
   const onSave = useCallback(async () => {
+    if (!customerLog) return; // guard: form is not interactive while pending
     setSaving(true);
     try {
       const override = diff(original, values);
       await sendCustomerLogToGroup({
-        id: initialRow.id,
+        id: customerLog.id,
         group_id: groupId,
         override: Object.keys(override).length > 0 ? override : undefined,
       });
@@ -130,17 +216,36 @@ export const SummaryReviewScreen: React.FC = () => {
     } finally {
       setSaving(false);
     }
-  }, [groupId, initialRow.id, original, values]);
+  }, [groupId, customerLog, original, values]);
 
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener(
       'successOverlayDismissed',
-      () => {
+      (returnToHome: boolean) => {
         navigation.popToTop();
+        // After confirm or auto-dismiss, send Youngman to the background so
+        // the user lands back on whatever app they were in before the call.
+        // (The "고객관리 바로가기" path keeps Youngman in the foreground —
+        // emits returnToHome=false.)
+        if (returnToHome && Platform.OS === 'android') {
+          const bridge = (
+            NativeModules as { AppBridge?: { moveToBackground: () => void } }
+          ).AppBridge;
+          try {
+            bridge?.moveToBackground();
+          } catch {
+            // ignore — at worst the user stays in the WebView
+          }
+        }
       },
     );
     return () => sub.remove();
   }, [navigation]);
+
+  const processingHeadline =
+    processingElapsedMs > 5000 ? '거의 다 됐어요' : 'AI가 통화 내용 분석 중';
+  const processingHint =
+    processingElapsedMs > 5000 ? '마무리 중이에요…' : '약 7초 정도 걸려요';
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -148,9 +253,11 @@ export const SummaryReviewScreen: React.FC = () => {
         <Pressable onPress={() => navigation.popToTop()} hitSlop={12}>
           <Text style={styles.close}>닫기</Text>
         </Pressable>
-        <Pressable onPress={onSave} disabled={saving} hitSlop={12}>
-          <Text style={styles.save}>양식 전송</Text>
-        </Pressable>
+        {!processing && (
+          <Pressable onPress={onSave} disabled={saving} hitSlop={12}>
+            <Text style={styles.save}>양식 전송</Text>
+          </Pressable>
+        )}
       </View>
 
       <KeyboardAvoidingView
@@ -165,46 +272,64 @@ export const SummaryReviewScreen: React.FC = () => {
       >
         <Text style={styles.title}>AI 요약 결과</Text>
         <Text style={styles.subtitle}>
-          AI가 정리한 내용이에요. 필요하면 수정해주세요.
+          {processing
+            ? 'AI가 통화를 분석하고 있어요. 잠시만 기다려주세요.'
+            : 'AI가 정리한 내용이에요. 필요하면 수정해주세요.'}
         </Text>
 
-        <View style={styles.metaCard}>
-          <Text style={styles.metaText}>
-            상담일시 {new Date(initialRow.consult_at).toLocaleString('ko-KR')}
-          </Text>
-        </View>
-
-        <Text style={styles.groupPickerLabel}>양식을 전송할 그룹</Text>
-        <Pressable
-          style={styles.groupChip}
-          onPress={() => setGroupPickerOpen(true)}
-        >
-          <Text style={styles.groupChipValue} numberOfLines={1}>
-            {selectedGroupTitle}
-          </Text>
-          <Text style={styles.groupChipChevron}>▾</Text>
-        </Pressable>
-
-        {FIELDS.map(f => (
-          <View key={f.key} style={styles.fieldBlock}>
-            <Text style={styles.fieldLabel}>{f.label}</Text>
-            <TextInput
-              style={[styles.input, f.multiline ? styles.inputMulti : undefined]}
-              value={values[f.key]}
-              onChangeText={t => updateField(f.key, t)}
-              placeholder={f.placeholder ?? ''}
-              placeholderTextColor="#999"
-              multiline={f.multiline}
-              textAlignVertical={f.multiline ? 'top' : 'center'}
-            />
+        {processing ? (
+          <View style={styles.processingBody}>
+            <ActivityIndicator size="large" color="#0066FF" />
+            <Text style={styles.processingHeadline}>{processingHeadline}</Text>
+            <Text style={styles.processingHint}>{processingHint}</Text>
           </View>
-        ))}
+        ) : (
+          <>
+            {customerLog && (
+              <View style={styles.metaCard}>
+                <Text style={styles.metaText}>
+                  상담일시{' '}
+                  {new Date(customerLog.consult_at).toLocaleString('ko-KR')}
+                </Text>
+              </View>
+            )}
 
-        {saving && (
-          <View style={styles.savingOverlay}>
-            <ActivityIndicator />
-            <Text style={styles.savingText}>저장 중…</Text>
-          </View>
+            <Text style={styles.groupPickerLabel}>양식을 전송할 그룹</Text>
+            <Pressable
+              style={styles.groupChip}
+              onPress={() => setGroupPickerOpen(true)}
+            >
+              <Text style={styles.groupChipValue} numberOfLines={1}>
+                {selectedGroupTitle}
+              </Text>
+              <Text style={styles.groupChipChevron}>▾</Text>
+            </Pressable>
+
+            {FIELDS.map(f => (
+              <View key={f.key} style={styles.fieldBlock}>
+                <Text style={styles.fieldLabel}>{f.label}</Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    f.multiline ? styles.inputMulti : undefined,
+                  ]}
+                  value={values[f.key]}
+                  onChangeText={t => updateField(f.key, t)}
+                  placeholder={f.placeholder ?? ''}
+                  placeholderTextColor="#999"
+                  multiline={f.multiline}
+                  textAlignVertical={f.multiline ? 'top' : 'center'}
+                />
+              </View>
+            ))}
+
+            {saving && (
+              <View style={styles.savingOverlay}>
+                <ActivityIndicator />
+                <Text style={styles.savingText}>저장 중…</Text>
+              </View>
+            )}
+          </>
         )}
       </ScrollView>
       </KeyboardAvoidingView>
@@ -292,6 +417,22 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   metaText: { color: '#666666', fontSize: 13, marginVertical: 1 },
+  processingBody: {
+    marginTop: 48,
+    alignItems: 'center',
+    gap: 16,
+  },
+  processingHeadline: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#111111',
+    letterSpacing: -0.2,
+  },
+  processingHint: {
+    fontSize: 14,
+    color: '#666666',
+    marginTop: -8,
+  },
   fieldBlock: { marginTop: 16 },
   fieldLabel: { fontSize: 13, color: '#666666', marginBottom: 6 },
   input: {

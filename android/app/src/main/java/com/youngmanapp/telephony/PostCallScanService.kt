@@ -7,6 +7,8 @@ import android.app.Service
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
+import android.database.ContentObserver
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -30,10 +32,25 @@ import com.youngmanapp.overlay.OverlayService
 class PostCallScanService : Service() {
 
   private val handler = Handler(Looper.getMainLooper())
-  private val deadlineMs = 30_000L
+  // 60s window — MediaStore on Android 16 sometimes takes 30-50s to populate
+  // DURATION/MIME for a freshly recorded call. 30s was too tight: the row
+  // appears in the query but `duration=0` makes it fail our classifier filter
+  // until indexing completes. 60s covers all observed cases without burning
+  // much battery (poll interval is 2s, so only 30 extra cheap queries).
+  private val deadlineMs = 60_000L
   private val pollIntervalMs = 2_000L
   private var startedAt = 0L
   private lateinit var notifier: RecordingDetectedNotifier
+  /** Listens for MediaStore.Audio changes so a brand-new recording fires an
+   *  immediate scan instead of waiting for the next 2-second poll tick. Cuts
+   *  the typical "modal appears" latency from ~2-3s to ~200ms. */
+  private var mediaObserver: ContentObserver? = null
+  private val observerUri: Uri =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+      } else {
+        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+      }
 
   data class FoundFile(
       val uri: String,
@@ -54,8 +71,36 @@ class PostCallScanService : Service() {
     startedAt = System.currentTimeMillis()
     Log.d(TAG, "onStartCommand")
     startForeground(NOTIF_ID_ONGOING, buildOngoingNotification())
+    registerMediaObserver()
     handler.post(pollRunnable)
     return START_NOT_STICKY
+  }
+
+  private fun registerMediaObserver() {
+    if (mediaObserver != null) return
+    mediaObserver = object : ContentObserver(handler) {
+      override fun onChange(selfChange: Boolean, uri: Uri?) {
+        // Run the poll immediately when MediaStore signals a change. The
+        // scheduled poll will still happen later — both are idempotent.
+        Log.d(TAG, "MediaStore change observed (uri=$uri) — kicking poll")
+        handler.removeCallbacks(pollRunnable)
+        handler.post(pollRunnable)
+      }
+    }
+    try {
+      contentResolver.registerContentObserver(observerUri, true, mediaObserver!!)
+    } catch (e: Exception) {
+      Log.w(TAG, "registerContentObserver failed", e)
+      mediaObserver = null
+    }
+  }
+
+  private fun unregisterMediaObserver() {
+    val obs = mediaObserver ?: return
+    try {
+      contentResolver.unregisterContentObserver(obs)
+    } catch (_: Exception) {}
+    mediaObserver = null
   }
 
   private val pollRunnable =
@@ -91,6 +136,7 @@ class PostCallScanService : Service() {
 
   private fun stopSelfSafely() {
     handler.removeCallbacks(pollRunnable)
+    unregisterMediaObserver()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
       stopForeground(STOP_FOREGROUND_REMOVE)
     } else {
@@ -101,6 +147,7 @@ class PostCallScanService : Service() {
 
   override fun onDestroy() {
     handler.removeCallbacks(pollRunnable)
+    unregisterMediaObserver()
     super.onDestroy()
   }
 
@@ -185,21 +232,32 @@ class PostCallScanService : Service() {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(this) else true
 
   private fun buildOngoingNotification(): Notification {
-    ensureChannel(this, CHANNEL_ID_ONGOING, "통화녹음 감지", NotificationManager.IMPORTANCE_LOW)
-    return NotificationCompat.Builder(this, CHANNEL_ID_ONGOING)
+    ensureChannel(this, CHANNEL_ID_ONGOING, "백그라운드 처리", NotificationManager.IMPORTANCE_MIN)
+    val builder = NotificationCompat.Builder(this, CHANNEL_ID_ONGOING)
         .setSmallIcon(R.mipmap.ic_launcher)
         .setContentTitle("영맨")
-        .setContentText("통화녹음 감지 중…")
+        .setContentText("잠시만요…")
         .setOngoing(true)
-        .setPriority(NotificationCompat.PRIORITY_LOW)
+        .setSilent(true)
+        .setPriority(NotificationCompat.PRIORITY_MIN)
         .setCategory(NotificationCompat.CATEGORY_SERVICE)
-        .build()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      // Defer the notification by 10s so it doesn't flash in the status bar
+      // every time the service starts. Most call-recording indexings finish
+      // well before that window — the user never sees the notification.
+      builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
+    }
+    return builder.build()
   }
 
   companion object {
     private const val TAG = "PostCallScanService"
     private const val NOTIF_ID_ONGOING = 4001
-    private const val CHANNEL_ID_ONGOING = "yk_post_call_scan"
+    // v2 — IMPORTANCE_MIN so the status-bar icon doesn't appear during the
+    // brief post-call scan. Channel importance can't be lowered after a
+    // channel exists, so we ship a new channel id when the bar gets noisier
+    // than the user expects.
+    private const val CHANNEL_ID_ONGOING = "yk_post_call_scan_v2"
 
     fun start(ctx: Context) {
       val intent = Intent(ctx, PostCallScanService::class.java)

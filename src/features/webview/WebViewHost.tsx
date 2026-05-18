@@ -15,6 +15,7 @@ import type { RootStackParamList } from '../../navigation/types';
 
 import { CUSTOMERS_PATH, USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/env';
 import { isLoggedIn } from '../../services/auth/session';
+import { BackgroundPermissionBanner } from '../callRecording/components/BackgroundPermissionBanner';
 import { PendingReminderModal } from '../callRecording/components/PendingReminderModal';
 import { triggerCatchUpScan } from '../callRecording/scanner/recordingScanner';
 import { syncLedgerGroupsToNative } from '../callRecording/services/ledgerGroupsSync';
@@ -69,6 +70,10 @@ export const WebViewHost: React.FC = () => {
         );
         return true;
       }
+      if (route.pathname === 'settings') {
+        navigation.navigate('Settings');
+        return true;
+      }
       return false;
     },
     [navigation],
@@ -101,6 +106,9 @@ export const WebViewHost: React.FC = () => {
 
   const onNavigationStateChange = useCallback((nav: WebViewNavigation) => {
     setCanGoBack(nav.canGoBack);
+    if (__DEV__) {
+      console.log('[WebView nav]', nav.url);
+    }
   }, []);
 
   const onAuthLogin = useCallback((auth: AuthLoginPayload) => {
@@ -192,6 +200,7 @@ export const WebViewHost: React.FC = () => {
     // system navigation bar. The WebView painting through to the screen edge
     // matches the mobile-browser experience that the web team designs against.
     <SafeAreaView style={styles.container} edges={['top']}>
+      <BackgroundPermissionBanner />
       <View style={styles.flex}>
         <WebView
           ref={webViewRef}

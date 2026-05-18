@@ -1,3 +1,4 @@
+import type { ProcessRecordingInput } from '../features/callRecording/api/processRecording';
 import type {
   CustomerLogRow,
   LedgerGroup,
@@ -12,7 +13,14 @@ export interface ConfirmRecordingParams {
 }
 
 export interface SummaryReviewParams {
-  customerLog: CustomerLogRow;
+  /** Set when the customer log has already been processed (history → review,
+   *  or legacy ConfirmRecording path). */
+  customerLog?: CustomerLogRow;
+  /** Set when upload finished but processRecording hasn't been called yet.
+   *  SummaryReview runs process inside its own useEffect and fills the form
+   *  when it returns — so the user perceives the screen transition as
+   *  instant instead of staring at a 7s loading screen. */
+  pendingJob?: ProcessRecordingInput;
   /** Group selected upstream (glass overlay / ConfirmRecording). null = auto-default. */
   groupId?: string | null;
   /** Cached groups so the picker on this screen does not need to refetch. */
@@ -24,4 +32,5 @@ export type RootStackParamList = {
   OnboardingDemo: undefined;
   ConfirmRecording: ConfirmRecordingParams;
   SummaryReview: SummaryReviewParams;
+  Settings: undefined;
 };

@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  Alert,
+  AppState,
+  PermissionsAndroid,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 import {
   getBackgroundStatus,
@@ -13,45 +22,159 @@ import {
 interface PermState {
   battery: BackgroundStatusInfo | null;
   overlay: boolean | null;
+  runtime: boolean | null;
 }
 
+// Only the runtime permissions that the core flow (post-call modal) literally
+// cannot work without. READ_CONTACTS is requested lazily on first lookup —
+// the customer_name_hint hits a graceful fallback otherwise. POST_NOTIFICATIONS
+// is auto-prompted by Android the first time a notification is posted.
+// READ_CALL_LOG is no longer needed (CallScreeningService delivers number).
+const RUNTIME_PERMISSIONS_BASE = [
+  PermissionsAndroid.PERMISSIONS.READ_MEDIA_AUDIO,
+  PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE,
+];
+
+function runtimePermissions(): ReadonlyArray<string> {
+  if (Platform.OS !== 'android') return [];
+  return RUNTIME_PERMISSIONS_BASE;
+}
+
+async function allRuntimePermissionsGranted(): Promise<boolean> {
+  if (Platform.OS !== 'android') return true;
+  for (const p of runtimePermissions()) {
+    const ok = await PermissionsAndroid.check(p);
+    if (!ok) return false;
+  }
+  return true;
+}
+
+// Session-scoped flag — auto-trigger the runtime permission dialog once per
+// app process so a fresh-install user gets the dialog without tapping the
+// card. After the user accepts or declines, subsequent app launches won't
+// re-prompt within the same session. (Hard-declined: system won't show the
+// dialog anyway. Granted: nothing to do. Soft-declined: user can tap the
+// card button to re-request.)
+let autoRequestedThisSession = false;
+
 export const BackgroundPermissionBanner: React.FC = () => {
-  const [state, setState] = useState<PermState>({ battery: null, overlay: null });
+  const [state, setState] = useState<PermState>({
+    battery: null,
+    overlay: null,
+    runtime: null,
+  });
   const [requesting, setRequesting] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [battery, overlay] = await Promise.all([
+    const [battery, overlay, runtime] = await Promise.all([
       getBackgroundStatus(),
       hasOverlayPermission(),
+      allRuntimePermissionsGranted(),
     ]);
-    setState({ battery, overlay });
+    setState({ battery, overlay, runtime });
   }, []);
 
   useEffect(() => {
     void refresh();
+
+    // Auto-fire the runtime-permission dialogs about a second after the app
+    // first opens — saves the user from having to tap the onboarding card.
+    // Once-per-session guard prevents re-prompting on every WebView remount.
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (Platform.OS === 'android' && !autoRequestedThisSession) {
+      autoRequestedThisSession = true;
+      timer = setTimeout(async () => {
+        const ok = await allRuntimePermissionsGranted();
+        if (!ok) {
+          try {
+            await PermissionsAndroid.requestMultiple(
+              runtimePermissions() as string[],
+            );
+            void refresh();
+          } catch {
+            // ignore — the card's button is still a manual fallback
+          }
+        }
+      }, 1000);
+    }
+
     const sub = AppState.addEventListener('change', s => {
       if (s === 'active') {
         void refresh();
       }
     });
-    return () => sub.remove();
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      sub.remove();
+    };
   }, [refresh]);
 
   const battery = state.battery;
   const overlay = state.overlay;
-  if (battery == null || overlay == null) {
+  const runtime = state.runtime;
+  if (battery == null || overlay == null || runtime == null) {
     return null;
   }
 
   const batteryOk =
     battery.status === 'unrestricted' || battery.status === 'unknown';
   const overlayOk = overlay === true;
+  const runtimeOk = runtime === true;
 
-  if (batteryOk && overlayOk) {
+  // CallScreening role is intentionally NOT in the first-run onboarding —
+  // it only affects the incoming-call banner, and surfacing it on first open
+  // forces the user to either deal with the "Caller ID & spam" system screen
+  // before they ever see the app, or to walk through one more permission. The
+  // user enables it on demand from Settings → 수신 통화 식별 when ready.
+  if (batteryOk && overlayOk && runtimeOk) {
     return null;
   }
 
   const cards: React.ReactNode[] = [];
+
+  // Runtime permissions go FIRST — without them the rest of the flow
+  // (post-call modal, incoming-call identification) physically can't work.
+  if (!runtimeOk) {
+    cards.push(
+      <View key="runtime" style={styles.card}>
+        <Text style={styles.title}>✨ 영맨 사용을 위해 한 번만 설정해주세요</Text>
+        <Text style={styles.body}>
+          영맨이 쓰는 권한과 사유를 미리 알려드려요. 이 정보는 영맨 안에서만 쓰이고, 다른 곳으로 전송되지 않습니다.
+        </Text>
+
+        <View style={styles.reasonBox}>
+          <Text style={styles.reasonLine}>
+            <Text style={styles.reasonLabel}>• 오디오 파일 </Text>
+            <Text style={styles.reasonText}>— 통화녹음 파일을 찾아 AI 요약</Text>
+          </Text>
+          <Text style={styles.reasonLine}>
+            <Text style={styles.reasonLabel}>• 전화 상태 </Text>
+            <Text style={styles.reasonText}>— 통화 시작/종료 감지</Text>
+          </Text>
+        </View>
+
+        <Pressable
+          style={[styles.primaryButton, requesting && styles.buttonDisabled]}
+          onPress={async () => {
+            setRequesting(true);
+            try {
+              await PermissionsAndroid.requestMultiple(
+                runtimePermissions() as string[],
+              );
+            } finally {
+              setRequesting(false);
+            }
+          }}
+          disabled={requesting}
+        >
+          <Text style={styles.primaryButtonText}>
+            한 번에 권한 허용하기 (최초 1회만)
+          </Text>
+        </Pressable>
+      </View>,
+    );
+  }
 
   if (!overlayOk) {
     cards.push(
@@ -188,6 +311,22 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   usageBody: { fontSize: 12, color: '#555', lineHeight: 17 },
+  reasonBox: {
+    marginTop: 10,
+    padding: 12,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#F0DBA8',
+    gap: 4,
+  },
+  reasonLine: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#5A3A00',
+  },
+  reasonLabel: { fontWeight: '700' },
+  reasonText: { color: '#5A3A00' },
   primaryButton: {
     marginTop: 12,
     backgroundColor: '#0066FF',

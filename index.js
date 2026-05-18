@@ -15,6 +15,7 @@ import { syncLedgerGroupsToNative } from './src/features/callRecording/services/
 import { isLoggedIn, restoreSession } from './src/services/auth/session';
 import { registerFcmTokenWithServer } from './src/services/fcm/registerFcmToken';
 import { installGlobalErrorHandler } from './src/services/logger/errorLog';
+import { syncSettingsToNative } from './src/services/settings/settings';
 
 setBackgroundMessageHandler(getMessaging(), async remoteMessage => {
   if (__DEV__) {
@@ -25,6 +26,11 @@ setBackgroundMessageHandler(getMessaging(), async remoteMessage => {
 // Catch uncaught JS errors and persist them to disk so we can inspect later
 // even if Metro / USB was not connected when the error happened.
 installGlobalErrorHandler();
+
+// Mirror user Settings into the native SharedPreferences store so that
+// OverlayService / CallStateReceiver pick up the user's choices right away
+// — these native components can't reach into AsyncStorage on their own.
+void syncSettingsToNative();
 
 // Restore persisted JWT session at JS init time so headless tasks and any
 // startup API calls have credentials immediately. Once the JWT is back in

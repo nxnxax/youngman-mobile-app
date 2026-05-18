@@ -6,12 +6,16 @@ import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
 import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
+import com.youngmanapp.app.AppBridgePackage
+import com.youngmanapp.auth.AuthBridgePackage
 import com.youngmanapp.callrecording.RecordingScannerPackage
 import com.youngmanapp.contacts.ContactsPackage
 import com.youngmanapp.ledger.LedgerGroupsPackage
 import com.youngmanapp.logging.ErrorLogPackage
+import com.youngmanapp.overlay.IncomingCallOverlayPackage
 import com.youngmanapp.overlay.ProgressOverlayPackage
 import com.youngmanapp.overlay.SuccessOverlayPackage
+import com.youngmanapp.settings.SettingsBridgePackage
 import com.youngmanapp.system.BackgroundRestrictionPackage
 
 class MainApplication : Application(), ReactApplication {
@@ -28,6 +32,10 @@ class MainApplication : Application(), ReactApplication {
           add(LedgerGroupsPackage())
           add(SuccessOverlayPackage())
           add(ProgressOverlayPackage())
+          add(SettingsBridgePackage())
+          add(IncomingCallOverlayPackage())
+          add(AuthBridgePackage())
+          add(AppBridgePackage())
         },
     )
   }

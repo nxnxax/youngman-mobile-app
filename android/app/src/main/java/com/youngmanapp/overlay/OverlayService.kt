@@ -21,6 +21,7 @@ import android.widget.TextView
 import com.youngmanapp.R
 import com.youngmanapp.ledger.LedgerGroupsCache
 import com.youngmanapp.logging.ErrorLog
+import com.youngmanapp.settings.SettingsStore
 import com.youngmanapp.telephony.PostCallScanService
 
 /**
@@ -83,10 +84,12 @@ class OverlayService : Service() {
   private val autoDismiss = Runnable { dismiss() }
 
   /** Reset the inactivity timer — called on the initial show AND on every
-   *  user touch routed through the overlay root view. */
+   *  user touch routed through the overlay root view. Dwell time is read from
+   *  user Settings (10 / 15 / 20s); falls back to AUTO_DISMISS_MS_DEFAULT. */
   private fun scheduleAutoDismiss() {
     handler.removeCallbacks(autoDismiss)
-    handler.postDelayed(autoDismiss, AUTO_DISMISS_MS)
+    val dwell = SettingsStore.read(this).modalDwellMs
+    handler.postDelayed(autoDismiss, if (dwell > 0) dwell else AUTO_DISMISS_MS_DEFAULT)
   }
 
   private fun hasOverlayPermission(): Boolean =
@@ -349,7 +352,7 @@ class OverlayService : Service() {
     const val EXTRA_DATE_ADDED = "dateAdded"
     const val EXTRA_MIME = "mimeType"
     const val EXTRA_GROUP_ID = "groupId"
-    const val AUTO_DISMISS_MS = 15_000L
+    const val AUTO_DISMISS_MS_DEFAULT = 15_000L
     private const val DEFAULT_GROUP_LABEL = "기본 그룹 (자동 생성)"
 
     fun start(ctx: Context, found: PostCallScanService.FoundFile) {

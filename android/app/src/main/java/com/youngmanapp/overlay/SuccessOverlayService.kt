@@ -61,12 +61,16 @@ class SuccessOverlayService : Service() {
         LayoutInflater.from(this).inflate(R.layout.overlay_success, null, false)
 
     view.findViewById<View>(R.id.success_btn_ok).setOnClickListener {
-      dismissWithSync()
+      // Confirm → minimize Youngman so the user lands back on whatever app
+      // they were in before the call (YouTube, KakaoTalk, etc.).
+      dismissWithSync(returnToHome = true)
     }
 
     view.findViewById<View>(R.id.success_btn_customer).setOnClickListener {
+      // Customer-ledger jump should KEEP Youngman in the foreground — the
+      // deep link routes the WebView to /customers.html.
       openCustomerLedger()
-      dismissWithSync()
+      dismissWithSync(returnToHome = false)
     }
 
     val type =
@@ -95,7 +99,9 @@ class SuccessOverlayService : Service() {
       windowManager.addView(view, params)
       overlayView = view
       animateIn(view)
-      handler.postDelayed({ dismissWithSync() }, HOLD_MS)
+      // Auto-dismiss after the hold timer — treat the same as the user
+      // tapping confirm (i.e. user did NOT explicitly request the ledger).
+      handler.postDelayed({ dismissWithSync(returnToHome = true) }, HOLD_MS)
     } catch (e: Exception) {
       Log.w(TAG, "addView failed", e)
       stopSelf()
@@ -112,10 +118,15 @@ class SuccessOverlayService : Service() {
 
   /** Dismiss the overlay AND notify any RN listener so dependent screens
    *  (SummaryReview) can pop in lockstep. Safe to call multiple times — the
-   *  scheduled auto-dismiss may race with a manual confirm tap. */
-  private fun dismissWithSync() {
+   *  scheduled auto-dismiss may race with a manual confirm tap.
+   *
+   *  @param returnToHome true when the user (or auto-dismiss) didn't ask
+   *  for the ledger jump — the RN side responds by sending the app to the
+   *  background so the user lands back on their previous app.
+   */
+  private fun dismissWithSync(returnToHome: Boolean) {
     handler.removeCallbacksAndMessages(null)
-    emitDismissEvent()
+    emitDismissEvent(returnToHome)
     animateOutAndStop()
   }
 
@@ -155,7 +166,7 @@ class SuccessOverlayService : Service() {
     }
   }
 
-  private fun emitDismissEvent() {
+  private fun emitDismissEvent(returnToHome: Boolean) {
     val reactContext: ReactContext? = try {
       (applicationContext as? ReactApplication)
           ?.reactHost
@@ -167,7 +178,7 @@ class SuccessOverlayService : Service() {
     try {
       reactContext
           ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-          ?.emit(EVENT_DISMISSED, null)
+          ?.emit(EVENT_DISMISSED, returnToHome)
     } catch (e: Throwable) {
       Log.w(TAG, "emit failed", e)
     }

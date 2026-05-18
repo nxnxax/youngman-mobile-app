@@ -19,7 +19,6 @@ import { ApiError } from '../../../services/api/client';
 import { isLoggedIn } from '../../../services/auth/session';
 import { lookupContactName } from '../../../services/contacts/lookupContact';
 import { deterministicRequestId } from '../../../shared/uuid';
-import { processRecording } from '../api/processRecording';
 import { fetchLedgerGroups } from '../api/records';
 import type { LedgerGroup } from '../api/types';
 import { uploadRecording } from '../api/uploadRecording';
@@ -28,7 +27,10 @@ import { extractPhoneNumber } from '../scanner/heuristics';
 type Nav = NativeStackNavigationProp<RootStackParamList, 'ConfirmRecording'>;
 type Route = RouteProp<RootStackParamList, 'ConfirmRecording'>;
 
-type Stage = 'idle' | 'uploading' | 'processing';
+// Upload is the only thing this screen actually waits for now —
+// processRecording moved into SummaryReview so the user gets the screen
+// transition immediately and stares at the form skeleton instead of a
+// 7-second spinner.
 
 function formatDuration(ms: number): string {
   const totalSec = Math.round(ms / 1000);
@@ -60,10 +62,6 @@ export const ConfirmRecordingScreen: React.FC = () => {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Route>();
   const { uri, name, duration, dateAdded, mimeType } = route.params;
-  // Start in `uploading` so the screen never flashes the idle button — the
-  // recording UX is "one-tap from the modal" and this screen only exists to
-  // show progress before SummaryReview opens.
-  const [stage, setStage] = useState<Stage>('uploading');
   const startedRef = useRef(false);
 
   const phoneNumber = extractPhoneNumber(name);
@@ -79,44 +77,40 @@ export const ConfirmRecordingScreen: React.FC = () => {
       return;
     }
     try {
-      setStage('uploading');
       const contactName = await lookupContactName(phoneNumber);
-      const uploaded = await uploadRecording({
-        contentUri: uri,
-        displayName: name,
-        mimeType: mimeType || 'audio/mp4',
-        recordedAt,
-      });
+      // Upload + groups in parallel — groups call is fast (~ms) and the user
+      // will need it on the SummaryReview group picker; no reason to defer.
+      const [uploaded, groupsRes] = await Promise.all([
+        uploadRecording({
+          contentUri: uri,
+          displayName: name,
+          mimeType: mimeType || 'audio/mp4',
+          recordedAt,
+        }),
+        fetchLedgerGroups('customer').catch(err => {
+          if (__DEV__) {
+            console.log('[ConfirmRecording] fetchLedgerGroups failed', err);
+          }
+          return { groups: [] as ReadonlyArray<LedgerGroup> };
+        }),
+      ]);
 
-      setStage('processing');
-      const processed = await processRecording({
-        storage_path: uploaded.storage_path,
-        duration_sec: Math.round(duration / 1000),
-        original_filename: name,
-        recorded_at: recordedAt,
-        phone_number: phoneNumber,
-        client_request_id: deterministicRequestId(uri),
-        customer_name_hint: contactName,
-      });
-
-      let groups: ReadonlyArray<LedgerGroup> = [];
-      try {
-        const res = await fetchLedgerGroups('customer');
-        groups = res.groups;
-      } catch (err) {
-        if (__DEV__) {
-          console.log('[ConfirmRecording] fetchLedgerGroups failed', err);
-        }
-      }
-
-      setStage('idle');
-      // Omit groupId so SummaryReview can default to the user's main group.
+      // Hand off the rest of the work to SummaryReview as a pendingJob. The
+      // user perceives the transition as "tap → form (loading)" instead of
+      // "tap → spinner for 7s → form".
       navigation.replace('SummaryReview', {
-        customerLog: processed.customer_log,
-        availableGroups: groups,
+        pendingJob: {
+          storage_path: uploaded.storage_path,
+          duration_sec: Math.round(duration / 1000),
+          original_filename: name,
+          recorded_at: recordedAt,
+          phone_number: phoneNumber,
+          client_request_id: deterministicRequestId(uri),
+          customer_name_hint: contactName,
+        },
+        availableGroups: groupsRes.groups,
       });
     } catch (e) {
-      setStage('idle');
       if (e instanceof ApiError && e.code === 'plan_required') {
         Alert.alert(
           'Premium 구독이 필요해요',
@@ -150,6 +144,9 @@ export const ConfirmRecordingScreen: React.FC = () => {
     return () => clearInterval(id);
   }, []);
 
+  const loadingHeadline = '오디오 업로드 중';
+  const loadingHint = '잠시만요…';
+
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.headerRow}>
@@ -163,7 +160,8 @@ export const ConfirmRecordingScreen: React.FC = () => {
 
       <View style={styles.loadingBody}>
         <ActivityIndicator size="large" color="#0066FF" />
-        <Text style={styles.loadingText}>AI 요약 중{dots}</Text>
+        <Text style={styles.loadingText}>{loadingHeadline}{dots}</Text>
+        <Text style={styles.loadingHint}>{loadingHint}</Text>
       </View>
     </SafeAreaView>
   );
@@ -190,5 +188,10 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#111111',
     letterSpacing: -0.2,
+  },
+  loadingHint: {
+    fontSize: 14,
+    color: '#666666',
+    marginTop: 4,
   },
 });

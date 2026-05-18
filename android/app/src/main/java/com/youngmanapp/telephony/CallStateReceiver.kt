@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.telephony.TelephonyManager
 import android.util.Log
+import com.youngmanapp.overlay.IncomingCallOverlayService
+import com.youngmanapp.settings.SettingsStore
 
 /**
  * Manifest-registered receiver for android.intent.action.PHONE_STATE.
@@ -28,8 +30,20 @@ class CallStateReceiver : BroadcastReceiver() {
     CallStateMemory.write(context, state)
     Log.d(TAG, "state transition: $previous -> $state")
 
+    // RINGING resolved (user picked up or hung up / call was missed) — drop
+    // the incoming-call banner regardless of outcome. The banner itself is
+    // surfaced by YoungmanCallScreeningService, which has access to the
+    // caller number; we just clean up here.
+    if (previous == TelephonyManager.EXTRA_STATE_RINGING && state != previous) {
+      IncomingCallOverlayService.dismiss(context)
+    }
+
     if (state == TelephonyManager.EXTRA_STATE_IDLE &&
         previous == TelephonyManager.EXTRA_STATE_OFFHOOK) {
+      if (!SettingsStore.read(context).realtimeDetection) {
+        Log.d(TAG, "call ended but realtime detection is OFF — skipping")
+        return
+      }
       Log.d(TAG, "call ended (OFFHOOK -> IDLE), starting scan service")
       PostCallScanService.start(context)
     }

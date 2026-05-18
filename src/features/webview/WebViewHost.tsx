@@ -1,7 +1,7 @@
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Platform, StyleSheet, View } from 'react-native';
+import { AppState, DeviceEventEmitter, Platform, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import type {
@@ -14,6 +14,7 @@ import type {
 import type { RootStackParamList } from '../../navigation/types';
 
 import { CUSTOMERS_PATH, USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/env';
+import { SESSION_REFRESH_REQUEST_EVENT } from '../../services/api/client';
 import { isLoggedIn } from '../../services/auth/session';
 import { BackgroundPermissionBanner } from '../callRecording/components/BackgroundPermissionBanner';
 import { PendingReminderModal } from '../callRecording/components/PendingReminderModal';
@@ -36,6 +37,11 @@ export const WebViewHost: React.FC = () => {
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const webViewRef = useRef<WebView | null>(null);
   const authRef = useRef<AuthLoginPayload | null>(null);
+  // Bumped each time the web side pushes a fresh auth.login. The session-
+  // refresh handler captures the value at request time and skips the
+  // fallback reload if it sees a different value at the timer mark — i.e.
+  // the inline refresh path already delivered.
+  const sessionUpdateCounterRef = useRef<number>(0);
   const [loading, setLoading] = useState<boolean>(true);
   const [canGoBack, setCanGoBack] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -116,6 +122,75 @@ export const WebViewHost: React.FC = () => {
     return () => sub.remove();
   }, []);
 
+  // API client emits this when a request returns 401 or the cached JWT is
+  // about to expire. The WebView is the auth source of truth (Supabase JS
+  // SDK lives here and auto-refreshes); we inject a script that either:
+  //   1) calls a bridge hook the web team exposes, or
+  //   2) calls Supabase JS directly if it's available on `window`, or
+  //   3) falls back to reloading the WebView so bridge.js re-posts auth.login
+  //      from the freshly-loaded Supabase session.
+  // Whichever path runs, the eventual `auth.login` bridge message wakes the
+  // waiter in session.ts → the failed API call retries with the new JWT.
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(
+      SESSION_REFRESH_REQUEST_EVENT,
+      () => {
+        if (__DEV__) {
+          console.log('[Session] refresh requested — injecting');
+        }
+        webViewRef.current?.injectJavaScript(`
+          (function() {
+            try {
+              if (window.__bridge && typeof window.__bridge.requestSessionRefresh === 'function') {
+                window.__bridge.requestSessionRefresh();
+                return;
+              }
+              var sb = window.supabase || window.supabaseClient || window._supabase;
+              if (sb && sb.auth && typeof sb.auth.refreshSession === 'function') {
+                sb.auth.refreshSession().then(function(r) {
+                  var s = r && r.data && r.data.session;
+                  if (!s) return;
+                  window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'auth.login',
+                    payload: {
+                      accessToken: s.access_token,
+                      refreshToken: s.refresh_token,
+                      userId: s.user && s.user.id,
+                      email: s.user && s.user.email,
+                      expiresAt: s.expires_at,
+                    }
+                  }));
+                });
+                return;
+              }
+            } catch (e) {
+              // ignore — final fallback is the reload() below
+            }
+          })();
+          true;
+        `);
+        // Hard fallback: if neither the bridge hook nor a global Supabase
+        // client delivered a fresh auth.login, reload the WebView. Page
+        // boot path always re-publishes auth.login as part of the bridge
+        // handshake, so reload reliably restores tokens — at the cost of
+        // wiping any in-WebView state (form drafts, scroll position).
+        const counterAtRequest = sessionUpdateCounterRef.current;
+        setTimeout(() => {
+          if (sessionUpdateCounterRef.current !== counterAtRequest) {
+            // Inline path already delivered a fresh auth.login — skip reload
+            // so the user keeps their WebView state.
+            return;
+          }
+          if (__DEV__) {
+            console.log('[Session] fallback — reloading WebView');
+          }
+          webViewRef.current?.reload();
+        }, 3_000);
+      },
+    );
+    return () => sub.remove();
+  }, []);
+
   const onNavigationStateChange = useCallback((nav: WebViewNavigation) => {
     setCanGoBack(nav.canGoBack);
     if (__DEV__) {
@@ -125,6 +200,7 @@ export const WebViewHost: React.FC = () => {
 
   const onAuthLogin = useCallback((auth: AuthLoginPayload) => {
     authRef.current = auth;
+    sessionUpdateCounterRef.current += 1;
     if (__DEV__) {
       console.log('[Auth] login', auth.userId, auth.email);
     }

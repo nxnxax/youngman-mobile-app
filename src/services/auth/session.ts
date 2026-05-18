@@ -33,6 +33,57 @@ function syncToNative(token: string | null): void {
 
 let current: AuthLoginPayload | null = null;
 
+// Callbacks fired when setSession() runs — used by API client to wake up after
+// a session refresh round-trip through the WebView. Always one-shot; the
+// caller re-subscribes each time.
+const sessionUpdateWaiters: Array<(payload: AuthLoginPayload) => void> = [];
+
+function notifySessionWaiters(payload: AuthLoginPayload): void {
+  const fns = sessionUpdateWaiters.splice(0);
+  for (const fn of fns) {
+    try {
+      fn(payload);
+    } catch {
+      // ignore — best-effort fan-out
+    }
+  }
+}
+
+/**
+ * Resolves on the next setSession() call, or false on timeout. Used by the
+ * API client after a 401: emit a refresh request to the WebView, then await
+ * here for the WebView's bridge to post a fresh auth.login. Timeout protects
+ * against the WebView being dead / lacking the refresh hook.
+ */
+export async function waitForSessionUpdate(
+  timeoutMs: number = 8_000,
+): Promise<AuthLoginPayload | null> {
+  return new Promise<AuthLoginPayload | null>(resolve => {
+    let settled = false;
+    const finish = (payload: AuthLoginPayload | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(payload);
+    };
+    const t = setTimeout(() => finish(null), timeoutMs);
+    sessionUpdateWaiters.push(payload => {
+      clearTimeout(t);
+      finish(payload);
+    });
+  });
+}
+
+/** Returns true if the current token is missing or within `bufferMs` of
+ *  expiry. Useful for proactive refresh before a slow flow (uploads). */
+export function isSessionExpiringSoon(bufferMs: number = 60_000): boolean {
+  if (!current) return true;
+  const exp = current.expiresAt;
+  if (!exp || exp <= 0) return false; // unknown expiry, assume OK
+  // Supabase expiresAt is in seconds (unix epoch). Normalize.
+  const expMs = exp < 10_000_000_000 ? exp * 1000 : exp;
+  return expMs - Date.now() < bufferMs;
+}
+
 function persist(value: AuthLoginPayload | null): void {
   void (async () => {
     try {
@@ -51,6 +102,7 @@ export function setSession(auth: AuthLoginPayload): void {
   current = auth;
   persist(auth);
   syncToNative(auth.accessToken);
+  notifySessionWaiters(auth);
 }
 
 export function clearSession(): void {

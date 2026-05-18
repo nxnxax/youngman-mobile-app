@@ -1,5 +1,11 @@
+import { DeviceEventEmitter } from 'react-native';
+
 import { API_BASE_URL } from '../../config/env';
-import { getAccessToken } from '../auth/session';
+import {
+  getAccessToken,
+  isSessionExpiringSoon,
+  waitForSessionUpdate,
+} from '../auth/session';
 import { logError } from '../logger/errorLog';
 
 export class ApiError extends Error {
@@ -35,7 +41,46 @@ function requireToken(): string {
   return token;
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
+/**
+ * Bridge event the WebViewHost listens for to refresh the Supabase session.
+ * The WebView is the one that owns the Supabase JS SDK (web is the auth
+ * source of truth); RN's JWT cache rots on long sessions / cold starts from
+ * native triggers (CallScreening, PostCallScan). When that happens, the
+ * server rejects the request with 401 — the API client emits this event and
+ * waits up to ~8s for the WebView to push a fresh `auth.login`.
+ */
+export const SESSION_REFRESH_REQUEST_EVENT = 'youngman.session.refreshRequest';
+
+/** Fire-and-forget: ask the WebView to push us a fresh session. Awaiting the
+ *  response is done by waitForSessionUpdate(). */
+function requestSessionRefresh(): void {
+  DeviceEventEmitter.emit(SESSION_REFRESH_REQUEST_EVENT);
+}
+
+/** Wait at most `timeoutMs` for the WebView to post `auth.login`. Returns
+ *  true if the session was updated (so the caller may retry). */
+async function tryRefreshSession(timeoutMs: number = 8_000): Promise<boolean> {
+  requestSessionRefresh();
+  const next = await waitForSessionUpdate(timeoutMs);
+  return next != null;
+}
+
+/** Quietly try to refresh BEFORE a slow flow if the cached token looks stale.
+ *  Best-effort — caller can ignore the return. */
+async function maybeProactiveRefresh(): Promise<void> {
+  if (!isSessionExpiringSoon(60_000)) return;
+  await tryRefreshSession(5_000);
+}
+
+interface RequestOptions {
+  /** Internal — prevents infinite recursion when a retry also gets 401. */
+  _retried?: boolean;
+}
+
+export async function apiGet<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  if (!opts._retried) {
+    await maybeProactiveRefresh();
+  }
   const token = requireToken();
   const t0 = Date.now();
   const res = await fetch(`${API_BASE_URL}${path}`, {
@@ -56,6 +101,11 @@ export async function apiGet<T>(path: string): Promise<T> {
       JSON.stringify(parsed).slice(0, 800),
     );
   }
+  if (res.status === 401 && !opts._retried) {
+    if (await tryRefreshSession()) {
+      return apiGet<T>(path, { _retried: true });
+    }
+  }
   if (!res.ok) {
     const apiError = new ApiError(
       parsed.code ?? 'http_error',
@@ -68,7 +118,14 @@ export async function apiGet<T>(path: string): Promise<T> {
   return parsed;
 }
 
-export async function apiPost<T>(path: string, body: unknown): Promise<T> {
+export async function apiPost<T>(
+  path: string,
+  body: unknown,
+  opts: RequestOptions = {},
+): Promise<T> {
+  if (!opts._retried) {
+    await maybeProactiveRefresh();
+  }
   const token = requireToken();
   const t0 = Date.now();
   const res = await fetch(`${API_BASE_URL}${path}`, {
@@ -93,6 +150,11 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
       JSON.stringify(parsed).slice(0, 800),
     );
   }
+  if (res.status === 401 && !opts._retried) {
+    if (await tryRefreshSession()) {
+      return apiPost<T>(path, body, { _retried: true });
+    }
+  }
   if (!res.ok) {
     const apiError = new ApiError(
       parsed.code ?? 'http_error',
@@ -108,7 +170,11 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
 export async function apiPostMultipart<T>(
   path: string,
   form: FormData,
+  opts: RequestOptions = {},
 ): Promise<T> {
+  if (!opts._retried) {
+    await maybeProactiveRefresh();
+  }
   const token = requireToken();
   const t0 = Date.now();
   const res = await fetch(`${API_BASE_URL}${path}`, {
@@ -130,6 +196,11 @@ export async function apiPostMultipart<T>(
       'body=',
       JSON.stringify(parsed).slice(0, 800),
     );
+  }
+  if (res.status === 401 && !opts._retried) {
+    if (await tryRefreshSession()) {
+      return apiPostMultipart<T>(path, form, { _retried: true });
+    }
   }
   if (!res.ok) {
     const apiError = new ApiError(

@@ -2,6 +2,11 @@ import { Linking, Platform } from 'react-native';
 
 import { APP_VERSION } from '../../../config/env';
 import {
+  noteBridgeHeartbeat,
+  reset as resetRefreshMutex,
+  type BridgeHeartbeatPayload,
+} from '../../../services/auth/refreshMutex';
+import {
   clearSession,
   setSession,
 } from '../../../services/auth/session';
@@ -22,6 +27,7 @@ import {
 } from '../../../services/fcm/registerFcmToken';
 import {
   clearErrorLog,
+  logError,
   readErrorLog,
 } from '../../../services/logger/errorLog';
 import {
@@ -36,6 +42,11 @@ export interface AuthLoginPayload {
   userId: string;
   email: string;
   expiresAt: number;
+  /** Web-side timestamp (ms) tagged on every notifyLogin. Lets the
+   *  client correlate logout payloads to their corresponding login
+   *  epoch when both arrive in quick succession. Added by 영맨 commit
+   *  7917f43. Older WebView builds may omit this field. */
+  authEpoch?: number;
 }
 
 export interface AppInfo {
@@ -71,6 +82,7 @@ function toAuthPayload(raw: unknown): AuthLoginPayload | null {
     userId: String(p.userId),
     email: String(p.email ?? ''),
     expiresAt: Number(p.expiresAt ?? 0),
+    authEpoch: p.authEpoch != null ? Number(p.authEpoch) : undefined,
   };
 }
 
@@ -82,6 +94,34 @@ export function buildAppInfo(): AppInfo {
     systemVersion: String(Platform.Version),
   };
 }
+
+// Dedup key for auth.login bursts. WebView's bridge re-emits auth.login
+// many times in quick succession (Supabase onAuthStateChange fires
+// INITIAL_SESSION + SIGNED_IN + TOKEN_REFRESHED + USER_UPDATED, each
+// triggers a postMessage). Without this guard, RN runs setSession +
+// syncLedgerGroupsToNative + registerFcmTokenWithServer 50× per second,
+// saturating the JS thread and starving native triggers like the
+// post-call modal. Reset on logout so a new login is always processed.
+let lastProcessedAccessToken: string | null = null;
+
+// Timestamp of the most recent processed auth.login. Used by the
+// auth.logout race guard below.
+let lastLoginAt = 0;
+
+/** auth.logout race window (ms). When the WebView spits SIGNED_OUT
+ *  within this many ms after a SIGNED_IN / TOKEN_REFRESHED, treat it as
+ *  a Supabase JS state-machine bug rather than a real user logout.
+ *
+ *  사장님 ErrorLog 2026-05-20 05:51 케이스:
+ *    Auth.login → 240-280ms 후 Auth.logout → 또 Auth.login → 또 Auth.logout
+ *  무한 반복. 사장님이 logout 누른 적 없는데 WebView 측에서 자동 emit.
+ *
+ *  영맨 웹팀이 진단 + commit 7917f43 (logout.html ?explicit=1 가드 +
+ *  bridge.js notifyLogout 자체 cooldown 30s)으로 root fix 적용 — 정상
+ *  사용자 logout은 ?explicit=1 으로만 도달하므로 우리도 cooldown 30s로
+ *  맞추면 정책 일치. 사용자가 의도적으로 30초 안에 로그아웃 + 재로그인
+ *  하는 케이스는 사실상 없으므로 안전. */
+const AUTH_LOGOUT_RACE_WINDOW_MS = 30_000;
 
 export async function handleBridgeMessage(
   raw: string,
@@ -101,6 +141,22 @@ export async function handleBridgeMessage(
     case 'auth.login': {
       const auth = toAuthPayload(msg.payload);
       if (auth) {
+        if (auth.accessToken === lastProcessedAccessToken) {
+          // Same token, just a spam re-emit — skip everything.
+          return;
+        }
+        lastProcessedAccessToken = auth.accessToken;
+        lastLoginAt = Date.now();
+        // 영맨 사이트 bridge.js 가 fresh 로그인 직후 첫 auth.login 에
+        // refresh_token 누락한 채로 push 하는 케이스 추적용 breadcrumb. 두
+        // 번째 auth.login 가 채워서 다시 오면 authReady 게이트가 정상 진입.
+        // 누락이 잦으면 웹팀에 spec 보완 요청 근거 자료.
+        if (!auth.refreshToken) {
+          logError(
+            'Auth.login',
+            new Error('refreshToken missing in payload — waiting for next emit'),
+          );
+        }
         setSession(auth);
         ctx.onAuthLogin(auth);
         // Fire-and-forget: populate the native ledger-groups cache so the
@@ -113,6 +169,27 @@ export async function handleBridgeMessage(
       return;
     }
     case 'auth.logout': {
+      // Race guard: if a fresh auth.login just landed, ignore this logout.
+      // WebView occasionally emits SIGNED_OUT right after SIGNED_IN /
+      // TOKEN_REFRESHED in a race that's not a real user-initiated logout
+      // (사장님 ErrorLog 2026-05-20 05:51 — login → 240ms → logout 무한 반복).
+      const sinceLogin = Date.now() - lastLoginAt;
+      if (lastLoginAt > 0 && sinceLogin < AUTH_LOGOUT_RACE_WINDOW_MS) {
+        if (__DEV__) {
+          console.log(
+            '[Auth] ignoring logout — race with recent login',
+            sinceLogin,
+            'ms ago',
+          );
+        }
+        return;
+      }
+      lastProcessedAccessToken = null;
+      lastLoginAt = 0;
+      // Clear any lingering refresh-mutex state — otherwise a half-finished
+      // refresh from the previous session could block the next login's
+      // first refresh attempt.
+      resetRefreshMutex();
       // Unregister BEFORE clearing the session — apiPost needs the JWT.
       void unregisterFcmTokenWithServer().finally(() => {
         clearSession();
@@ -160,6 +237,26 @@ export async function handleBridgeMessage(
       if (__DEV__) {
         console.log('[Bridge] ready', msg.payload);
       }
+      return;
+    }
+    case 'bridge.heartbeat': {
+      // 2026-05-20 신규 — WebView 가 살아있다는 주기적 신호. 영맨 사이트의
+      // bridge.js 가 30초마다 + 상태 변경 시 발송 (WEB_TEAM_REQUEST_2026-05-20.md
+      // §1.5). 미수신 = WebView 사망 가정 → api/client.ts 가 native fallback
+      // 우선. 구버전 사이트엔 이 메시지가 없으므로 미수신이 곧 native fallback
+      // 으로 가는 자연스러운 fallback 경로.
+      const raw = (msg.payload ?? {}) as Partial<BridgeHeartbeatPayload>;
+      noteBridgeHeartbeat({
+        bridgeReady: !!raw.bridgeReady,
+        hasSession: !!raw.hasSession,
+        expiresAt:
+          typeof raw.expiresAt === 'number' && raw.expiresAt > 0
+            ? raw.expiresAt
+            : null,
+        refreshInflight: !!raw.refreshInflight,
+        timestamp:
+          typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
+      });
       return;
     }
     case 'app.fcm.request': {

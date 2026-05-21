@@ -1,4 +1,4 @@
-import { Alert, Linking } from 'react-native';
+import { DeviceEventEmitter } from 'react-native';
 
 import { isLoggedIn } from '../auth/session';
 import type { AuthProfile } from './api';
@@ -7,6 +7,19 @@ import {
   evaluateSummaryGate,
   type SummaryGate,
 } from './billingStore';
+
+export type { SummaryGate } from './billingStore';
+
+/** Event fired when a plan-blocked action is attempted. PlanGateModal
+ *  listens at the WebViewHost root and renders the styled card. */
+export const PLAN_GATE_SHOW_EVENT = 'youngman.planGate.show';
+
+export function showPlanGate(
+  gate: SummaryGate,
+  profile: AuthProfile | null,
+): void {
+  DeviceEventEmitter.emit(PLAN_GATE_SHOW_EVENT, { gate, profile });
+}
 
 /**
  * Centralized gating UX. Both the post-call modal "양식에 전송" path
@@ -29,7 +42,7 @@ export async function assertCanRunSummary(): Promise<boolean> {
   if (!profile) {
     // No profile loaded. If logged out, block; otherwise let server decide.
     if (!isLoggedIn()) {
-      showGateAlert({ allowed: false, reason: 'not_logged_in' }, null);
+      showPlanGate({ allowed: false, reason: 'not_logged_in' }, null);
       return false;
     }
     return true;
@@ -38,7 +51,7 @@ export async function assertCanRunSummary(): Promise<boolean> {
   if (gate.allowed) {
     return true;
   }
-  showGateAlert(gate, profile);
+  showPlanGate(gate, profile);
   return false;
 }
 
@@ -106,19 +119,4 @@ export function gateCopy(
   }
 }
 
-function showGateAlert(gate: SummaryGate, profile: AuthProfile | null): void {
-  const copy = gateCopy(gate, profile);
-  const buttons: Array<{ text: string; onPress?: () => void }> =
-    copy.cta && copy.ctaDeepLink
-      ? [
-          { text: '나중에' },
-          {
-            text: copy.cta,
-            onPress: () => {
-              void Linking.openURL(copy.ctaDeepLink!);
-            },
-          },
-        ]
-      : [{ text: '확인' }];
-  Alert.alert(copy.title, copy.body, buttons);
-}
+

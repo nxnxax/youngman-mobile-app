@@ -77,6 +77,7 @@ build.log
 
 # Claude Code local settings
 .claude/
+PROJECT_CONTEXT.md
 
 # Firebase config — contains project API key, must be downloaded per developer
 android/app/google-services.json

@@ -17,7 +17,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { RootStackParamList } from '../../../navigation/types';
 import { ApiError } from '../../../services/api/client';
 import { isLoggedIn } from '../../../services/auth/session';
-import { assertCanRunSummary } from '../../../services/billing/gating';
+import {
+  assertCanRunSummary,
+  showPlanGate,
+} from '../../../services/billing/gating';
+import {
+  ensureFreshProfile,
+  evaluateSummaryGate,
+  getCachedProfile,
+} from '../../../services/billing/billingStore';
 import { lookupContactName } from '../../../services/contacts/lookupContact';
 import { deterministicRequestId } from '../../../shared/uuid';
 import { fetchLedgerGroups } from '../api/records';
@@ -69,6 +77,18 @@ export const ConfirmRecordingScreen: React.FC = () => {
   const recordedAt = toIso8601KST(dateAdded);
 
   const onProcess = async () => {
+    // Session restore + short retry — race window after deep-link entry.
+    // The WebView's auth.login bridge message may not have re-populated
+    // the RN-side session yet (cold start or recent auth.logout race),
+    // so we wait up to 3s for the session to arrive before giving up.
+    // Without this the user gets a "로그인이 필요해요" modal even though
+    // they're actually logged in — the bridge just hasn't caught up.
+    if (!isLoggedIn()) {
+      const deadline = Date.now() + 3_000;
+      while (!isLoggedIn() && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
     if (!isLoggedIn()) {
       Alert.alert(
         '로그인이 필요해요',
@@ -122,10 +142,12 @@ export const ConfirmRecordingScreen: React.FC = () => {
       });
     } catch (e) {
       if (e instanceof ApiError && e.code === 'plan_required') {
-        Alert.alert(
-          'Premium 구독이 필요해요',
-          '무료 체험 횟수가 끝났습니다.',
-        );
+        // Server flipped on us between the pre-call check and upload.
+        // Refresh and surface the same styled gate modal.
+        await ensureFreshProfile();
+        const profile = getCachedProfile();
+        navigation.goBack();
+        showPlanGate(evaluateSummaryGate(profile), profile);
         return;
       }
       const msg = e instanceof ApiError ? e.message : String(e);

@@ -33,4 +33,8 @@ export type RootStackParamList = {
   ConfirmRecording: ConfirmRecordingParams;
   SummaryReview: SummaryReviewParams;
   Settings: undefined;
+  ErrorLog: undefined;
+  UnreviewedSummaries: undefined;
+  UnreviewedPreview: { jobId: string };
+  ManufacturerGuide: undefined;
 };

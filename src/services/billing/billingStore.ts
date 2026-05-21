@@ -1,9 +1,38 @@
-import { AppState, DeviceEventEmitter } from 'react-native';
+import { AppState, DeviceEventEmitter, NativeModules } from 'react-native';
 
 import { ApiError } from '../api/client';
 import { isLoggedIn } from '../auth/session';
 import { logError } from '../logger/errorLog';
 import { fetchAuthProfile, type AuthProfile } from './api';
+
+interface NativePlanCache {
+  write(json: string): Promise<void>;
+  clear(): Promise<void>;
+}
+
+const nativePlanCache = (
+  NativeModules as { PlanCache?: NativePlanCache }
+).PlanCache;
+
+/** Mirror the profile snapshot into the native SharedPreferences cache so
+ *  YoungmanCallScreeningService can gate the incoming-call banner even when
+ *  the RN bridge isn't loaded (cold call boot path). */
+function syncNativePlanCache(profile: AuthProfile | null): void {
+  if (!nativePlanCache) return;
+  if (profile) {
+    nativePlanCache
+      .write(JSON.stringify(profile))
+      .catch(e => {
+        if (__DEV__) console.log('[Billing] PlanCache.write failed', e);
+      });
+  } else {
+    nativePlanCache
+      .clear()
+      .catch(e => {
+        if (__DEV__) console.log('[Billing] PlanCache.clear failed', e);
+      });
+  }
+}
 
 /**
  * In-memory plan + usage cache. Refreshed on:
@@ -37,12 +66,14 @@ export function getCachedProfile(): AuthProfile | null {
 
 export function clearCachedProfile(): void {
   cache = null;
+  syncNativePlanCache(null);
 }
 
 /** Always hit the server. Use sparingly — prefer `ensureFreshProfile()`. */
 export async function refreshProfile(): Promise<AuthProfile | null> {
   if (!isLoggedIn()) {
     cache = null;
+    syncNativePlanCache(null);
     return null;
   }
   // De-dupe concurrent refreshes — the post-call autoSubmit task and the
@@ -54,6 +85,7 @@ export async function refreshProfile(): Promise<AuthProfile | null> {
     try {
       const profile = await fetchAuthProfile();
       cache = { profile, fetchedAt: Date.now() };
+      syncNativePlanCache(profile);
       DeviceEventEmitter.emit(BILLING_PROFILE_UPDATED_EVENT, profile);
       if (__DEV__) {
         console.log(

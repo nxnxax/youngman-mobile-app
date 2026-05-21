@@ -16,6 +16,12 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Used by RecordingDetectedNotifier to escalate the "통화녹음 발견"
+         notification to the lock screen via setFullScreenIntent. Granted
+         by default on Android <14; on 14+ the user can revoke in Special
+         App Access → Full screen notifications. Notification still posts
+         either way; FSI just brings the lock-screen UX. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
@@ -76,6 +82,18 @@
             <data android:scheme="youngman" />
         </intent-filter>
       </activity>
+
+      <!-- 사장님 정책 (2026-05-21): 잠금화면 통화 후 모달 보장. Activity API
+           인 setShowWhenLocked + setTurnScreenOn 으로 잠금 위에 OverlayService
+           띄움. 투명 + 애니메이션 없음 + recents 제외. -->
+      <activity
+          android:name=".overlay.LockScreenLauncherActivity"
+          android:theme="@android:style/Theme.Translucent.NoTitleBar"
+          android:excludeFromRecents="true"
+          android:noHistory="true"
+          android:showOnLockScreen="true"
+          android:turnScreenOn="true"
+          android:exported="false" />
 
       <receiver
           android:name=".telephony.CallStateReceiver"

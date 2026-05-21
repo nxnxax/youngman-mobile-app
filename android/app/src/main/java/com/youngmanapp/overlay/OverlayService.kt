@@ -18,7 +18,9 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.util.concurrent.atomic.AtomicReference
 import com.youngmanapp.R
+import com.youngmanapp.callrecording.RecordingState
 import com.youngmanapp.ledger.LedgerGroupsCache
 import com.youngmanapp.logging.ErrorLog
 import com.youngmanapp.settings.SettingsStore
@@ -33,6 +35,16 @@ import com.youngmanapp.telephony.PostCallScanService
  * permission is not granted, the service silently no-ops — caller should
  * detect the state and prompt the user separately.
  */
+/** 사장님 정책 (2026-05-21 비상 fix): 모달의 4가지 chain (사용자 review / submit /
+ *  auto-dismiss / idle) 중 최초 진입한 것만 허용. 두 chain 동시 실행 시 RN ↔
+ *  Native ↔ WebView token sync race 발생 → Supabase 403 + SummaryReview stale. */
+enum class OverlayAction {
+  NONE,
+  REVIEW,
+  SUBMIT,
+  AUTODISMISS,
+}
+
 class OverlayService : Service() {
 
   private var overlayView: View? = null
@@ -41,6 +53,21 @@ class OverlayService : Service() {
 
   /** null means "기본 그룹 (자동 생성)" — server will create or reuse the default. */
   private var selectedGroupId: String? = null
+
+  /** 사장님 정책 (2026-05-21 비상 fix, ChatGPT 진단): review/submit/autoDismiss
+   *  3개 chain 이 동시 실행되면 RN↔Native↔WebView 3-way token sync race +
+   *  SummaryReview stale state 발생. 최초 진입한 한 chain 만 허용 (single-owner
+   *  lock). 새 모달 표시 시 NONE 으로 reset. */
+  private val action = AtomicReference(OverlayAction.NONE)
+
+  /** 현재 모달에 표시 중인 통화녹음 정보. auto-dismiss 시 자동 양식 전송에
+   *  사용 (사장님 정책 2026-05-21 — auto-dismiss = 미확인 요약 자동 저장).
+   *  사용자 명시 취소 (취소 버튼) 와 구분. */
+  private var currentUri: String? = null
+  private var currentName: String = ""
+  private var currentDuration: Long = 0L
+  private var currentDateAdded: Long = 0L
+  private var currentMimeType: String = "audio/mp4"
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -63,6 +90,21 @@ class OverlayService : Service() {
       return START_NOT_STICKY
     }
 
+    // 사장님 정책 (2026-05-21 구조 변경): placeholder mode — 통화 끝나자마자
+    // 즉시 모달 표시 (파일 매칭 안 기다림). PostCallScanService 가 매칭한 후
+    // 두 번째 intent (data 포함) 보내면 모달 업데이트.
+    val isPlaceholder = intent.getBooleanExtra(EXTRA_PLACEHOLDER, false)
+
+    if (isPlaceholder) {
+      // 통화 종료 직후 즉시 모달. 사용자 시각적 "통화 끊자마자 모달".
+      if (overlayView == null) {
+        Log.d(TAG, "placeholder mode → showOverlay (uri 없이)")
+        showOverlay(uri = null, name = "", duration = 0L, dateAdded = 0L, mimeType = "audio/mp4")
+        scheduleAutoDismiss()
+      }
+      return START_NOT_STICKY
+    }
+
     val uri = intent.getStringExtra(EXTRA_URI)
     val name = intent.getStringExtra(EXTRA_NAME) ?: ""
     val duration = intent.getLongExtra(EXTRA_DURATION, 0L)
@@ -76,12 +118,99 @@ class OverlayService : Service() {
       return START_NOT_STICKY
     }
 
-    showOverlay(uri, name, duration, dateAdded, mimeType)
-    scheduleAutoDismiss()
+    // dedup — 이미 모달이 떠있고 (placeholder 든 data 든) 같은 파일이면 skip.
+    if (RecordingState.isFileShown(this, name)) {
+      Log.d(TAG, "dedup: file '$name' already shown — skip")
+      // 단 placeholder 가 떠있으면 update 는 해줘야 (autoDismiss 가 valid uri
+      // 로 startAutoSubmit 가능). dedup 만 차단 — view 자체는 update.
+      if (overlayView != null) {
+        updateOverlayData(uri, name, duration, dateAdded, mimeType)
+        currentUri = uri
+        currentName = name
+        currentDuration = duration
+        currentDateAdded = dateAdded
+        currentMimeType = mimeType
+      } else {
+        stopSelf()
+      }
+      return START_NOT_STICKY
+    }
+
+    if (overlayView != null) {
+      // placeholder 가 이미 떠있음 — data 업데이트.
+      Log.d(TAG, "update overlay with data uri=$uri name=$name")
+      updateOverlayData(uri, name, duration, dateAdded, mimeType)
+    } else {
+      // 처음부터 data 와 함께 (PostCallScanService 가 placeholder 없이 직접 호출).
+      showOverlay(uri, name, duration, dateAdded, mimeType)
+      scheduleAutoDismiss()
+    }
+    RecordingState.markFileShown(this, name)
+
+    currentUri = uri
+    currentName = name
+    currentDuration = duration
+    currentDateAdded = dateAdded
+    currentMimeType = mimeType
+
     return START_NOT_STICKY
   }
 
-  private val autoDismiss = Runnable { dismiss() }
+  /** placeholder 로 표시된 모달의 텍스트만 데이터로 update. addView 다시 안
+   *  함 — 같은 view 재사용. group picker 도 그대로. */
+  private fun updateOverlayData(
+      uri: String,
+      name: String,
+      duration: Long,
+      dateAdded: Long,
+      mimeType: String,
+  ) {
+    val view = overlayView ?: return
+    try {
+      view.findViewById<TextView>(R.id.overlay_subtitle).text = buildSubtitle(name, duration)
+      // 버튼들 click listener 재바인딩 (uri 가 새로 들어왔음).
+      view.findViewById<View>(R.id.overlay_btn_review).setOnClickListener {
+        if (!action.compareAndSet(OverlayAction.NONE, OverlayAction.REVIEW)) {
+          Log.d(TAG, "review click ignored — action already=${action.get()}")
+          return@setOnClickListener
+        }
+        openReview(uri, name, duration, dateAdded, mimeType)
+        dismiss()
+      }
+      view.findViewById<View>(R.id.overlay_btn_submit).setOnClickListener {
+        if (!action.compareAndSet(OverlayAction.NONE, OverlayAction.SUBMIT)) {
+          Log.d(TAG, "submit click ignored — action already=${action.get()}")
+          return@setOnClickListener
+        }
+        startAutoSubmit(uri, name, duration, dateAdded, mimeType, pendingReview = false)
+        dismiss()
+      }
+    } catch (e: Throwable) {
+      Log.w(TAG, "updateOverlayData failed", e)
+    }
+  }
+
+  /** 사장님 정책 (2026-05-21): auto-dismiss = 사용자 명시 취소가 아님 →
+   *  자동으로 양식 전송 시작 (미확인 요약에 자동 보존). 취소 버튼 누른 경우
+   *  와 명확히 구분. AutoSubmit 은 upload + processRecording 진행 후 server
+   *  의 review_mode 에 따라 ready_to_review 상태로 저장 → 미확인 요약 화면. */
+  private val autoDismiss = Runnable {
+    // single-owner: 사용자가 이미 review/submit 누른 상태면 autoDismiss 진입 금지.
+    if (!action.compareAndSet(OverlayAction.NONE, OverlayAction.AUTODISMISS)) {
+      Log.d(TAG, "auto-dismiss skipped — action already=${action.get()}")
+      dismiss()
+      return@Runnable
+    }
+    val uri = currentUri
+    if (uri != null) {
+      Log.d(TAG, "auto-dismiss → startAutoSubmit pendingReview=true (미확인 요약 보존)")
+      startAutoSubmit(
+        uri, currentName, currentDuration, currentDateAdded, currentMimeType,
+        pendingReview = true,
+      )
+    }
+    dismiss()
+  }
 
   /** Reset the inactivity timer — called on the initial show AND on every
    *  user touch routed through the overlay root view. Dwell time is read from
@@ -96,13 +225,15 @@ class OverlayService : Service() {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(this) else true
 
   private fun showOverlay(
-      uri: String,
+      uri: String?,
       name: String,
       duration: Long,
       dateAdded: Long,
       mimeType: String,
   ) {
     dismissView()
+    // 새 모달 표시 = 새 사이클. 이전 모달의 action lock 해제.
+    action.set(OverlayAction.NONE)
 
     val view = LayoutInflater.from(this).inflate(R.layout.overlay_recording_found, null, false)
 
@@ -110,19 +241,37 @@ class OverlayService : Service() {
     // the inactivity timer so the modal does not vanish mid-interaction.
     (view as? DismissableTouchFrameLayout)?.onUserTouch = { scheduleAutoDismiss() }
 
-    view.findViewById<TextView>(R.id.overlay_subtitle).text = buildSubtitle(name, duration)
+    // 사장님 정책 (2026-05-21 구조 변경): placeholder mode 이면 uri null →
+    // "통화녹음 분석 중..." subtitle. data 모드 면 정상 subtitle. updateOverlayData
+    // 가 두 번째 intent 받으면 subtitle 다시 update.
+    view.findViewById<TextView>(R.id.overlay_subtitle).text =
+        if (uri == null) "통화녹음 분석 중..."
+        else buildSubtitle(name, duration)
 
     setupGroupPicker(view)
 
     view.findViewById<View>(R.id.overlay_btn_cancel).setOnClickListener { dismiss() }
 
+    // placeholder mode: 버튼 누르면 짧은 안내 후 비활성. data 받기 전엔 startAutoSubmit
+    // 불가 (uri null). 두 번째 intent (data) 가 onStartCommand → updateOverlayData
+    // 호출 → 버튼 listener 재바인딩 → 정상 작동.
     view.findViewById<View>(R.id.overlay_btn_review).setOnClickListener {
+      if (uri == null) return@setOnClickListener  // placeholder mode
+      if (!action.compareAndSet(OverlayAction.NONE, OverlayAction.REVIEW)) {
+        Log.d(TAG, "review click ignored — action already=${action.get()}")
+        return@setOnClickListener
+      }
       openReview(uri, name, duration, dateAdded, mimeType)
       dismiss()
     }
 
     view.findViewById<View>(R.id.overlay_btn_submit).setOnClickListener {
-      startAutoSubmit(uri, name, duration, dateAdded, mimeType)
+      if (uri == null) return@setOnClickListener  // placeholder mode
+      if (!action.compareAndSet(OverlayAction.NONE, OverlayAction.SUBMIT)) {
+        Log.d(TAG, "submit click ignored — action already=${action.get()}")
+        return@setOnClickListener
+      }
+      startAutoSubmit(uri, name, duration, dateAdded, mimeType, pendingReview = false)
       dismiss()
     }
 
@@ -131,11 +280,16 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-    // iOS-style alert: solid white card on top of a dimmed backdrop. No blur.
+    // 사장님 정책 (2026-05-21 도미노): 잠금화면 위 모달 표시. 통화 전 모달
+    // (IncomingCallOverlayService) 과 동일한 flag 조합. FLAG_DIM_BEHIND 가
+    // 잠금화면 위 표시를 막는 것으로 추정 — 제거. dim backdrop 효과 사라
+    // 지지만 모달 자체는 잠금화면 위에 정상 표시.
+    @Suppress("DEPRECATION")
     val flags =
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-            WindowManager.LayoutParams.FLAG_DIM_BEHIND
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
 
     val params =
         WindowManager.LayoutParams(
@@ -195,11 +349,14 @@ class OverlayService : Service() {
       duration: Long,
       dateAdded: Long,
       mimeType: String,
+      pendingReview: Boolean,
   ) {
-    // Brief 5-second progress card so the user sees confirmation that the
-    // submit was received. After dismiss, work continues silently in
-    // AutoSubmitService and the success overlay pops on completion.
-    ProgressOverlayService.start(this)
+    // 사장님 정책 (2026-05-21): pendingReview=true (auto-dismiss) 시엔 사용자가
+    // 모달 보고 있지 않음 — ProgressOverlay 갑자기 띄우면 짜증. 양식 전송 명시
+    // (false) 시에만 5초 progress card 표시.
+    if (!pendingReview) {
+      ProgressOverlayService.start(this)
+    }
 
     val intent =
         Intent(this, AutoSubmitService::class.java).apply {
@@ -208,9 +365,12 @@ class OverlayService : Service() {
           putExtra(EXTRA_DURATION, duration)
           putExtra(EXTRA_DATE_ADDED, dateAdded)
           putExtra(EXTRA_MIME, mimeType)
-          // selectedGroupId == null means "default group" — HeadlessJsTask reads
-          // missing/null extra and the JS task forwards null to the server.
-          selectedGroupId?.let { putExtra(EXTRA_GROUP_ID, it) }
+          // pendingReview=true 면 group_id 안 보냄 → server 가 ready_to_review
+          // 로 저장 (미확인 요약). false 면 선택한 그룹으로 즉시 mirror.
+          if (!pendingReview) {
+            selectedGroupId?.let { putExtra(EXTRA_GROUP_ID, it) }
+          }
+          putExtra(EXTRA_PENDING_REVIEW, pendingReview)
         }
     try {
       // Plain startService — NOT a foreground service. The user's tap on
@@ -303,7 +463,10 @@ class OverlayService : Service() {
   }
 
   private fun dismiss() {
-    handler.removeCallbacks(autoDismiss)
+    // 사장님 정책 (2026-05-21 비상 fix, ChatGPT 권고): autoDismiss 외에도 attach
+    // 됐을 수 있는 다른 callback (group picker animations 등) 까지 모두 제거.
+    // remaining race window 차단.
+    handler.removeCallbacksAndMessages(null)
     dismissView()
     stopSelf()
   }
@@ -314,6 +477,9 @@ class OverlayService : Service() {
       windowManager.removeView(view)
     } catch (_: Exception) {}
     overlayView = null
+    // auto-dismiss 가 이미 처리한 후 reset — 같은 service instance 가 새 모달
+    // 받을 때 fresh state.
+    currentUri = null
   }
 
   override fun onDestroy() {
@@ -354,6 +520,10 @@ class OverlayService : Service() {
     const val EXTRA_DATE_ADDED = "dateAdded"
     const val EXTRA_MIME = "mimeType"
     const val EXTRA_GROUP_ID = "groupId"
+    const val EXTRA_PENDING_REVIEW = "pendingReview"
+    /** 사장님 정책 (2026-05-21 구조 변경): true 면 placeholder 모달 표시.
+     *  통화 끝나자마자 즉시 표시 → PostCallScanService 매칭 후 data update. */
+    const val EXTRA_PLACEHOLDER = "placeholder"
     const val AUTO_DISMISS_MS_DEFAULT = 15_000L
     private const val DEFAULT_GROUP_LABEL = "기본 그룹 (자동 생성)"
 

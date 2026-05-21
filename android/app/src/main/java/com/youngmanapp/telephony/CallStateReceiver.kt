@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.telephony.TelephonyManager
 import android.util.Log
+import android.provider.Settings
 import com.youngmanapp.overlay.IncomingCallOverlayService
+import com.youngmanapp.overlay.OverlayService
 import com.youngmanapp.settings.SettingsStore
 
 /**
@@ -38,16 +40,40 @@ class CallStateReceiver : BroadcastReceiver() {
       IncomingCallOverlayService.dismiss(context)
     }
 
+    // 사장님 정책 (2026-05-21): 통화 시작 (RINGING/IDLE → OFFHOOK) 시점에
+    // PostCallScanService 미리 warm-up. 통화 동안 service / classloader /
+    // FGS 권한 모두 데워둠. 통화 종료 시 service start latency 0 → 모달 즉시.
+    if (state == TelephonyManager.EXTRA_STATE_OFFHOOK && previous != state) {
+      PostCallScanService.warmUp(context)
+    }
+
     if (state == TelephonyManager.EXTRA_STATE_IDLE &&
         previous == TelephonyManager.EXTRA_STATE_OFFHOOK) {
       if (!SettingsStore.read(context).realtimeDetection) {
         Log.d(TAG, "call ended but realtime detection is OFF — skipping")
         return
       }
-      Log.d(TAG, "call ended (OFFHOOK -> IDLE), starting scan service")
+      Log.d(TAG, "call ended (OFFHOOK -> IDLE), starting scan + placeholder modal")
+      // 사장님 정책 (2026-05-21 구조 변경): 통화 끊자마자 즉시 모달 (placeholder).
+      // PostCallScanService 매칭 후 data 채워짐. 시각적 "끊자마자 모달".
+      if (canDrawOverlay(context)) {
+        val placeholderIntent = Intent(context, OverlayService::class.java).apply {
+          putExtra(OverlayService.EXTRA_PLACEHOLDER, true)
+        }
+        try {
+          context.startService(placeholderIntent)
+        } catch (e: Throwable) {
+          Log.w(TAG, "placeholder overlay start failed", e)
+        }
+      }
       PostCallScanService.start(context)
     }
   }
+
+  private fun canDrawOverlay(ctx: Context): Boolean =
+      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M)
+        Settings.canDrawOverlays(ctx)
+      else true
 
   companion object {
     private const val TAG = "CallStateReceiver"

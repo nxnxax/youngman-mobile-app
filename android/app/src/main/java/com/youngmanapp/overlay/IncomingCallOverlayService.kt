@@ -100,10 +100,17 @@ class IncomingCallOverlayService : Service() {
     //  - NOT_TOUCHABLE: every touch passes through to the underlying call UI
     //  - NOT_FOCUSABLE: we do not steal IME / key focus
     //  - LAYOUT_NO_LIMITS: lets us sit above the status bar if needed
+    //  - SHOW_WHEN_LOCKED + TURN_SCREEN_ON: 잠금화면에서도 표시 (사장님 정책
+    //    2026-05-20 late). 한국 사용자 대부분 잠금 상태로 전화 받음.
+    //    deprecated API 지만 Samsung One UI 포함 대부분 OS 에서 여전히 동작.
+    //    안 되는 OEM 에서는 silently no-op — 다른 기능 영향 0.
+    @Suppress("DEPRECATION")
     val flags =
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
 
     val params =
         WindowManager.LayoutParams(

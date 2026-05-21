@@ -9,7 +9,6 @@ import {
   StyleSheet,
   Switch,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -26,8 +25,6 @@ import {
   DEFAULT_SETTINGS,
   type AppSettings,
   type ModalDwell,
-  type ModalSound,
-  type PopupFrequency,
   getSettings,
   isCallScreeningRoleHeld,
   requestCallScreeningRole,
@@ -42,35 +39,9 @@ const DWELL_OPTIONS: ReadonlyArray<{ value: ModalDwell; label: string }> = [
   { value: 20, label: '20초' },
 ];
 
-const SOUND_OPTIONS: ReadonlyArray<{ value: ModalSound; label: string }> = [
-  { value: 'on', label: '알림음' },
-  { value: 'off', label: '무음' },
-];
-
-const FREQUENCY_OPTIONS: ReadonlyArray<{
-  value: PopupFrequency;
-  label: string;
-  hint?: string;
-}> = [
-  { value: 'always', label: '항상 (현재 동작)' },
-  {
-    value: 'formal',
-    label: '존댓말을 사용한 통화만',
-    hint: '통화 분석 후 모달이 떠서 30~60초 지연됩니다',
-  },
-  {
-    value: 'keyword',
-    label: '특정 단어 인식 시',
-    hint: '아래 단어 목록 중 하나라도 통화에서 나오면 모달 표시',
-  },
-];
-
 export const SettingsScreen: React.FC = () => {
   const navigation = useNavigation<Nav>();
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
-  const [keywordsDraft, setKeywordsDraft] = useState<string>(
-    DEFAULT_SETTINGS.keywords,
-  );
   const [screeningRoleHeld, setScreeningRoleHeld] = useState<boolean>(false);
   const [profile, setProfile] = useState<AuthProfile | null>(
     getCachedProfile(),
@@ -80,7 +51,6 @@ export const SettingsScreen: React.FC = () => {
     (async () => {
       const s = await getSettings();
       setSettings(s);
-      setKeywordsDraft(s.keywords);
       setScreeningRoleHeld(await isCallScreeningRoleHeld());
       // Refresh plan/usage so the indicator on this screen matches reality —
       // user may have just upgraded or used their last summary.
@@ -190,49 +160,6 @@ export const SettingsScreen: React.FC = () => {
           ))}
         </Section>
 
-        <Section title="모달 알림음">
-          {SOUND_OPTIONS.map(opt => (
-            <Row
-              key={opt.value}
-              label={opt.label}
-              selected={settings.modalSound === opt.value}
-              onPress={() => patch({ modalSound: opt.value })}
-            />
-          ))}
-        </Section>
-
-        <Section
-          title="통화종료 후 모달 빈도"
-          footer="존댓말 / 특정 단어 옵션은 통화 분석 후 모달을 띄우므로 30~60초 정도 늦게 표시됩니다."
-        >
-          {FREQUENCY_OPTIONS.map(opt => (
-            <View key={opt.value}>
-              <Row
-                label={opt.label}
-                hint={opt.hint}
-                selected={settings.popupFrequency === opt.value}
-                onPress={() => patch({ popupFrequency: opt.value })}
-              />
-              {settings.popupFrequency === 'keyword' &&
-                opt.value === 'keyword' && (
-                  <View style={styles.keywordBlock}>
-                    <Text style={styles.keywordLabel}>
-                      인식할 단어 (쉼표로 구분)
-                    </Text>
-                    <TextInput
-                      style={styles.keywordInput}
-                      value={keywordsDraft}
-                      onChangeText={setKeywordsDraft}
-                      onBlur={() => patch({ keywords: keywordsDraft.trim() })}
-                      placeholder="사장님, 사모님"
-                      placeholderTextColor="#999"
-                    />
-                  </View>
-                )}
-            </View>
-          ))}
-        </Section>
-
         <Section
           title="영맨 실시간 통화 감지"
           footer="끄면 통화가 끝나도 모달이 뜨지 않습니다. 추후 직접 영맨을 열어 처리하실 수 있습니다."
@@ -288,6 +215,20 @@ export const SettingsScreen: React.FC = () => {
           <PolicyRow
             label="자동결제 안내"
             onPress={() => onOpenPolicy('auto-billing')}
+          />
+        </Section>
+
+        <Section
+          title="문제 해결"
+          footer="제조사별로 배터리 절전 / 자동 실행 설정이 달라 영맨이 백그라운드에서 멈출 수 있어요. 안정성 가이드를 한 번만 설정하면 됩니다."
+        >
+          <PolicyRow
+            label="제조사별 안정성 가이드"
+            onPress={() => navigation.navigate('ManufacturerGuide')}
+          />
+          <PolicyRow
+            label="에러 로그 보기"
+            onPress={() => navigation.navigate('ErrorLog')}
           />
         </Section>
 
@@ -455,24 +396,6 @@ const styles = StyleSheet.create({
   rowLabelAccent: { color: '#0066FF', fontWeight: '600' },
   rowHint: { fontSize: 12, color: '#888888', marginTop: 3 },
   rowCheck: { fontSize: 16, color: '#0066FF', fontWeight: '700' },
-  keywordBlock: {
-    paddingHorizontal: 16,
-    paddingBottom: 14,
-    paddingTop: 4,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
-  },
-  keywordLabel: { fontSize: 12, color: '#666666', marginBottom: 6 },
-  keywordInput: {
-    borderWidth: 1,
-    borderColor: '#DCDCDC',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    fontSize: 14,
-    color: '#111',
-    backgroundColor: '#FFFFFF',
-  },
   switchRow: {
     flexDirection: 'row',
     alignItems: 'center',

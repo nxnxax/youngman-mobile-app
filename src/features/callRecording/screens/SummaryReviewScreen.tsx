@@ -27,7 +27,7 @@ import {
   evaluateSummaryGate,
   getCachedProfile,
 } from '../../../services/billing/billingStore';
-import { gateCopy } from '../../../services/billing/gating';
+import { showPlanGate } from '../../../services/billing/gating';
 import { processRecording } from '../api/processRecording';
 import { sendCustomerLogToGroup } from '../api/records';
 import type {
@@ -99,6 +99,11 @@ export const SummaryReviewScreen: React.FC = () => {
   //    job to us. We run processRecording here so the user sees the form
   //    screen during the ~7s wait instead of staring at a ConfirmRecording
   //    spinner.
+  // 사장님 정책 (2026-05-21 비상 fix R2, ChatGPT 권고 + 사장님 PoC 보고):
+  // navigation 이 SummaryReview instance 재사용 시 useState 의 initializer 는
+  // 첫 mount 만 실행. params.pendingJob 이 바뀌어도 customerLog state 가 stale
+  // (이전 통화의 row) 로 남아 사용자 화면에 "이전 통화 요약"으로 표시되는 케이스
+  // 보고됨. render 직전 reqId mismatch 검사로 stale 차단.
   const [customerLog, setCustomerLog] = useState<CustomerLogRow | null>(
     params.customerLog ?? null,
   );
@@ -127,7 +132,9 @@ export const SummaryReviewScreen: React.FC = () => {
     return main?.id ?? null;
   });
   const [groupPickerOpen, setGroupPickerOpen] = useState(false);
-  const startedRef = useRef(false);
+  // 사장님 정책 (2026-05-21 비상 fix): 같은 instance 재사용 시 새 reqId 면 다시
+  // processRecording 호출되도록 마지막 처리된 client_request_id 보관.
+  const startedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (__DEV__ && customerLog) {
@@ -135,16 +142,45 @@ export const SummaryReviewScreen: React.FC = () => {
     }
   }, [customerLog]);
 
-  // Kick off processRecording exactly once when we land in pending mode.
+  // 사장님 정책 (2026-05-21 비상 fix, ChatGPT 권고): navigation 이 같은
+  // SummaryReview instance 를 재사용하는 케이스 대비. pendingJob.client_request_id
+  // 가 바뀌면 fresh start — 이전 통화 잔재 표시 차단. deps 에 reqId 포함.
+  // ref guard 는 strict mode double-invoke 방지용.
+  const pendingReqId = params.pendingJob?.client_request_id;
   useEffect(() => {
-    if (!params.pendingJob || customerLog) return;
-    if (startedRef.current) return;
-    startedRef.current = true;
+    if (!params.pendingJob || params.customerLog) return;
+    if (startedRef.current === pendingReqId) return;  // 같은 reqId 재진입 dedup
+    startedRef.current = pendingReqId ?? null;
+    setCustomerLog(null);
+    setProcessing(true);
+    // 새 reqId 진입 — form 의 user 편집 이전 잔재 clear. userEditedRef 도 reset.
+    userEditedRef.current = false;
+    setValues(emptyFormValues());
     let cancelled = false;
     (async () => {
       try {
         const res = await processRecording(params.pendingJob!);
         if (cancelled) return;
+        // server 가 dedup 으로 다른 통화의 customer_log 반환하는 케이스 차단.
+        // 응답의 client_request_id 가 호출 시 보낸 ID 와 일치하지 않으면 reject
+        // — "이전 통화 요약 표시" 회귀 방지.
+        const expected = params.pendingJob!.client_request_id;
+        const got = res.customer_log?.client_request_id;
+        if (expected && got && expected !== got) {
+          if (__DEV__) {
+            console.warn(
+              '[SummaryReview] client_request_id mismatch — rejecting',
+              { expected, got },
+            );
+          }
+          setProcessing(false);
+          Alert.alert(
+            '처리 실패',
+            '다른 통화의 요약이 반환됐어요. 잠시 후 다시 시도해주세요.',
+            [{ text: '확인', onPress: () => navigation.popToTop() }],
+          );
+          return;
+        }
         setCustomerLog(res.customer_log);
         if (!userEditedRef.current) {
           setValues(rowToFormValues(res.customer_log));
@@ -156,15 +192,14 @@ export const SummaryReviewScreen: React.FC = () => {
         if (e instanceof ApiError && e.code === 'plan_required') {
           // Defense-in-depth: pre-call gating in ConfirmRecording should
           // have caught this, but the user's quota may have shifted in
-          // the gap between screens. Refresh the profile and use the
-          // same gating copy as the entry-level check so the messages
-          // are consistent.
+          // the gap between screens. Refresh the profile and surface the
+          // styled plan-gate modal at the root — same component the
+          // entry-level check uses, so the messaging is consistent.
           await ensureFreshProfile();
-          const gate = evaluateSummaryGate(getCachedProfile());
-          const copy = gateCopy(gate, getCachedProfile());
-          Alert.alert(copy.title, copy.body, [
-            { text: '확인', onPress: () => navigation.popToTop() },
-          ]);
+          const profile = getCachedProfile();
+          const gate = evaluateSummaryGate(profile);
+          navigation.popToTop();
+          showPlanGate(gate, profile);
           return;
         }
         const msg = e instanceof ApiError ? e.message : String(e);
@@ -177,7 +212,7 @@ export const SummaryReviewScreen: React.FC = () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [pendingReqId]);
 
   useEffect(() => {
     if (!processing) {
@@ -190,6 +225,19 @@ export const SummaryReviewScreen: React.FC = () => {
     }, 500);
     return () => clearInterval(id);
   }, [processing]);
+
+  // 사장님 정책 (2026-05-21 비상 fix R2): customerLog state 가 stale (다른 통화)
+  // 인 경우 render 단에서 차단. useState 가 navigation reuse 에 의해 reset 안 되는
+  // 케이스의 final 안전망.
+  const displayLog = useMemo<CustomerLogRow | null>(() => {
+    if (!customerLog) return null;
+    const expected = pendingReqId ?? null;
+    const got = customerLog.client_request_id ?? null;
+    if (expected && got && expected !== got) {
+      return null;  // stale — 이전 통화 잔재
+    }
+    return customerLog;
+  }, [customerLog, pendingReqId]);
 
   const dirty = useMemo(() => {
     return Object.keys(diff(original, values)).length > 0;
@@ -209,12 +257,18 @@ export const SummaryReviewScreen: React.FC = () => {
   }, [availableGroups, groupId]);
 
   const onSave = useCallback(async () => {
-    if (!customerLog) return; // guard: form is not interactive while pending
+    // 사장님 정책 (2026-05-21 비상 fix R2): stale customer_log 로 sendCustomerLogToGroup
+    // 호출 차단. displayLog (= reqId 일치 통과한 row) 만 허용. 이전 통화 row 의 id
+    // 가 사장님 그룹에 mirror 되는 회귀 방지.
+    if (!displayLog) {
+      Alert.alert('요약 준비 중', '요약 처리가 완료되면 다시 시도해주세요.');
+      return;
+    }
     setSaving(true);
     try {
       const override = diff(original, values);
       await sendCustomerLogToGroup({
-        id: customerLog.id,
+        id: displayLog.id,
         group_id: groupId,
         override: Object.keys(override).length > 0 ? override : undefined,
       });
@@ -228,7 +282,7 @@ export const SummaryReviewScreen: React.FC = () => {
     } finally {
       setSaving(false);
     }
-  }, [groupId, customerLog, original, values]);
+  }, [groupId, displayLog, original, values]);
 
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener(
@@ -297,11 +351,18 @@ export const SummaryReviewScreen: React.FC = () => {
           </View>
         ) : (
           <>
-            {customerLog && (
+            {displayLog && (
               <View style={styles.metaCard}>
                 <Text style={styles.metaText}>
                   상담일시{' '}
-                  {new Date(customerLog.consult_at).toLocaleString('ko-KR')}
+                  {new Date(displayLog.consult_at).toLocaleString('ko-KR')}
+                </Text>
+              </View>
+            )}
+            {!displayLog && customerLog && (
+              <View style={styles.metaCard}>
+                <Text style={styles.metaText}>
+                  이전 통화 정보입니다. 요약 처리가 완료되면 새로 표시됩니다.
                 </Text>
               </View>
             )}

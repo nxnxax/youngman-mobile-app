@@ -3,6 +3,11 @@ import { AppState, DeviceEventEmitter, NativeModules, Platform } from 'react-nat
 import { listCustomerLogs } from '../api/records';
 import type { CustomerLogRow } from '../api/types';
 import { isLoggedIn } from '../../../services/auth/session';
+import {
+  ensureFreshProfile,
+  evaluateSummaryGate,
+  getCachedProfile,
+} from '../../../services/billing/billingStore';
 
 interface NativeIncomingCallOverlay {
   show(customerLabel: string, summary: string): Promise<void>;
@@ -66,17 +71,43 @@ function lookupMatchesInCache(wanted: string): ReadonlyArray<CustomerLogRow> {
 
 /** Match the incoming number against the user's customer_logs and, if there's
  *  a hit, pop the native in-call banner. Uses the in-memory cache first
- *  (instant); falls back to a fresh server query if the cache is empty. */
+ *  (instant); falls back to a fresh server query if the cache is empty.
+ *
+ *  Plan gate: pre-call banner is bundled with the post-call AI summary as
+ *  one billable unit. Free plan / quota-exhausted users see neither — the
+ *  banner is suppressed here and the post-call modal's 요약보기 path is
+ *  gated separately by `assertCanRunSummary()` in ConfirmRecording. */
 async function handleIncomingCall(rawNumber: string): Promise<void> {
   if (!isLoggedIn()) return;
   if (!native) return;
   const wanted = normalize(rawNumber);
   if (!wanted) return;
+  // Fail-OPEN on plan gate: if we have a profile cached, respect the gate
+  // verdict. If we don't (cold start, refresh in flight), allow the banner —
+  // blocking a paid user from seeing customer context is a worse failure
+  // than letting a free user glimpse the banner once. Kick a refresh in the
+  // background so the next call sees the cache.
+  const cached = getCachedProfile();
+  if (!cached) {
+    void ensureFreshProfile();
+  } else if (!evaluateSummaryGate(cached).allowed) {
+    return;
+  }
   try {
     let matches = lookupMatchesInCache(wanted);
     if (matches.length === 0 && cache.length === 0) {
-      // Cache was never populated — fetch synchronously. Slow path.
-      await refreshCache();
+      // Cache was never populated — fetch with a hard race timeout. The
+      // 2026-05-20 사장님 케이스: 94분 background 후 첫 통화에서
+      // proactive refresh(3.3s)와 customer-log fetch가 동시에 inflight
+      // 였고 await가 banner 가능 시간을 다 잡아먹음. RN path가 1.5s
+      // 안에 못 끝나면 포기 — YoungmanCallScreeningService 가 같은
+      // 통화에 대해 native HTTP path 도 병렬로 진행 중이므로 banner는
+      // 그쪽에서 표시될 수 있고, IncomingCallOverlayService 가 idempotent
+      // 라 race 해도 단일 banner 가 보장됨.
+      await Promise.race([
+        refreshCache(),
+        new Promise<void>(resolve => setTimeout(resolve, 1500)),
+      ]);
       matches = lookupMatchesInCache(wanted);
     }
     if (matches.length === 0) {
@@ -111,8 +142,11 @@ export function attachIncomingCallListener(): void {
       void handleIncomingCall(number);
     },
   );
-  // Warm the cache immediately + on every foreground entry.
+  // Warm the customer-log cache immediately + on every foreground entry.
+  // Also ensure the billing profile is loaded — the gate check at the top of
+  // handleIncomingCall reads it synchronously and bails when missing.
   void refreshCache();
+  void ensureFreshProfile();
   appStateSub = AppState.addEventListener('change', state => {
     if (state === 'active') {
       void refreshCache();

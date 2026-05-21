@@ -185,8 +185,34 @@ Content-Type: application/json
 6. **LLM**: call summarization model with prompt in §5.
 7. Insert into `customer_log` (server-side using service role, scoped to
    `user_id`).
-8. If free: `free_summaries_used += 1`.
+8. **Usage deduction (per-call bundle)**: pre-call banner + post-call modal +
+   AI summary count as **one billable unit per call**. The client now gates
+   the pre-call banner on plan/quota as well (see §10 below), so by the time
+   we get here we've decided to run the summary — increment `summary_used`
+   by **1 per unique `client_request_id`**. The client uses a deterministic
+   request id derived from the recording URI, so retries for the same call
+   collapse to a single increment. Reject duplicate `client_request_id`
+   submissions with the cached prior result (idempotency), not a fresh
+   summary run.
 9. Return the inserted row id + full record (so app can render preview).
+
+### §10 Per-call billing bundle (added 2026-05-19)
+
+The app surfaces three artifacts for a single inbound call:
+
+1. **Pre-call banner** (`YoungmanCallScreeningService` → `IncomingCallOverlayService`)
+   — shows existing-customer summary while the phone is still ringing.
+2. **Post-call modal** (`OverlayService` `overlay_recording_found.xml`) —
+   offers 요약보기 / 양식에 전송.
+3. **AI summary** (this endpoint `/process-recording.php`) — the actual
+   STT + LLM run.
+
+All three are bundled as one billable unit. The client gates (1) on the
+cached plan snapshot (native `PlanCache` SharedPreferences mirror) before
+even showing it to free / quota-exhausted users. The server is the source
+of truth and dedupes via `client_request_id`: if the same call comes back
+through this endpoint twice, return the cached result without incrementing
+`summary_used`.
 
 ### Success response (HTTP 200)
 

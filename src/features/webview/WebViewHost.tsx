@@ -1,7 +1,7 @@
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, DeviceEventEmitter, Platform, StyleSheet, View } from 'react-native';
+import { Alert, AppState, DeviceEventEmitter, Platform, StyleSheet, ToastAndroid, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import type {
@@ -14,18 +14,42 @@ import type {
 import type { RootStackParamList } from '../../navigation/types';
 
 import { CUSTOMERS_PATH, USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/env';
-import { SESSION_REFRESH_REQUEST_EVENT } from '../../services/api/client';
-import { isLoggedIn } from '../../services/auth/session';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+import {
+  SESSION_DEAD_EVENT,
+  SESSION_REFRESH_REQUEST_EVENT,
+  SESSION_SYNC_TO_WEBVIEW_EVENT,
+} from '../../services/api/client';
+import {
+  AUTO_SUBMIT_AUTH_FAIL_FLAG,
+  AUTO_SUBMIT_PENDING_FLAG,
+  PENDING_JOB_KEY,
+  type PendingJobPayload,
+} from '../callRecording/headless/autoSubmitTask';
+import { setActiveJob, getActiveJob } from '../processing/jobStore';
+import { logError } from '../../services/logger/errorLog';
+import {
+  isLoggedIn,
+  SESSION_AUTH_READY_EVENT,
+} from '../../services/auth/session';
+import { processOutbox } from '../../services/outbox/outboxProcessor';
+import { cleanupTerminalItems } from '../../services/outbox/outboxStore';
 import { refreshProfile as refreshBillingProfile } from '../../services/billing/billingStore';
+import { fetchUnreviewedCount } from '../callRecording/api/unreviewed';
 // TermsAgreementModal — intentionally NOT imported. Korean signup flow on
 // the web (subscribe.html / signup form) already requires 이용약관 +
 // 개인정보 consent at registration. Asking again in-app is redundant and
 // scares off free-tier users. Policy pages remain accessible any time via
 // Settings → 약관 / 정책. The component file is kept for archive in case
 // web team's signup ever needs to drop the checkboxes.
+import { PlanGateModal } from '../billing/components/PlanGateModal';
 import { TrialIntroModal } from '../billing/components/TrialIntroModal';
+// FloatingProcessingCard / useJobPolling — 사장님 정책 (2026-05-21):
+// 헤더 가리는 "audio_pending · 백그라운드 OK" 카드 기능 자체 제거.
+// 사용자가 미확인 요약 화면에서 처리하니까 floating 표시 불필요.
 import { UsageBanner } from '../billing/components/UsageBanner';
-import { BackgroundPermissionBanner } from '../callRecording/components/BackgroundPermissionBanner';
+import { PermissionBanner } from '../onboarding/PermissionBanner';
 import { PendingReminderModal } from '../callRecording/components/PendingReminderModal';
 import { triggerCatchUpScan } from '../callRecording/scanner/recordingScanner';
 import { syncLedgerGroupsToNative } from '../callRecording/services/ledgerGroupsSync';
@@ -44,6 +68,7 @@ import { useNetworkStatus } from './hooks/useNetworkStatus';
 export const WebViewHost: React.FC = () => {
   const navigation =
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+  // useJobPolling 제거됨 (2026-05-21): FloatingProcessingCard 와 함께 삭제.
   const webViewRef = useRef<WebView | null>(null);
   const authRef = useRef<AuthLoginPayload | null>(null);
   // Bumped each time the web side pushes a fresh auth.login. The session-
@@ -51,11 +76,57 @@ export const WebViewHost: React.FC = () => {
   // fallback reload if it sees a different value at the timer mark — i.e.
   // the inline refresh path already delivered.
   const sessionUpdateCounterRef = useRef<number>(0);
+  // Last time we hard-reloaded the WebView as a 401-recovery fallback.
+  // Used to throttle reloads — without this, a logged-out state where every
+  // background API call returns 401 triggers a reload, which fires more
+  // background calls on load, which all 401 again, → infinite reload loop
+  // (user sees the main screen flicker forever). 30s cooldown is long
+  // enough to break the loop but short enough to recover from a genuine
+  // single-shot stale token.
+  const lastReloadAtRef = useRef<number>(0);
+  // How many times in a row the session-refresh handler tried to recover
+  // without ever receiving a fresh auth.login back. When this crosses a
+  // threshold we give up auto-recovery and surface a "please log in again"
+  // event so the user can break the cycle manually.
+  const refreshFailureStreakRef = useRef<number>(0);
+  // Path A 3번 (웹팀 의뢰, 2026-05-20) — recent-success guard.
+  // 사장님 케이스: 첫 refresh 8.7초 만에 성공 → 그 직후 다른 백그라운드 401
+  // 시퀀스가 timeout → SESSION_DEAD 오발동. auth.login이 최근 60초 내에
+  // 도착했다면 세션은 명백히 살아있으므로 DEAD 신호를 무시한다.
+  const lastAuthLoginAtRef = useRef<number>(0);
   const [loading, setLoading] = useState<boolean>(true);
   const [canGoBack, setCanGoBack] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [webViewReady, setWebViewReady] = useState<boolean>(false);
   const online = useNetworkStatus();
+
+  // Policy 2 (2026-05-20): 네트워크 복구 시 outbox drain. offline 동안 보존된
+  // failed_retryable 작업이 즉시 재시도됨.
+  const prevOnlineRef = useRef<boolean>(true);
+  useEffect(() => {
+    if (online && !prevOnlineRef.current && isLoggedIn()) {
+      void processOutbox('network.online');
+    }
+    prevOnlineRef.current = online;
+  }, [online]);
+
+  // Play 안정화 (2026-05-21 audit): outbox 무한 누적 방지. saved /
+  // failed_permanent / dismissed 의 7일 이상 옛 항목 자동 삭제. WebView mount
+  // 시 1회 fire-and-forget — cold start 영향 0.
+  useEffect(() => {
+    void cleanupTerminalItems();
+  }, []);
+
+  // Policy (2026-05-20 사장님): 세션이 isAuthReady 만족하는 즉시 — auth.login,
+  // native refresh, restoreSession 어떤 경로든 — outbox 자동 재개. onAuthLogin
+  // 콜백 (WebView postMessage 경로) 외의 모든 setSession 경로 cover. 최초
+  // 사용자 첫 통화가 토큰 준비 타이밍 때문에 잃지 않음.
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(SESSION_AUTH_READY_EVENT, () => {
+      void processOutbox('session.authReady');
+    });
+    return () => sub.remove();
+  }, []);
 
   const onNativeRoute = useCallback(
     (route: NativeRoute): boolean => {
@@ -87,6 +158,14 @@ export const WebViewHost: React.FC = () => {
       }
       if (route.pathname === 'settings') {
         navigation.navigate('Settings');
+        return true;
+      }
+      if (route.pathname === 'unreviewed') {
+        // 영맨 사이트 하단 nav "미확인 요약" 탭 → youngman://nav?pathname=unreviewed
+        // 호출 시 native 화면으로 전환 (사장님 정책 2026-05-21).
+        // 사용자가 영맨 사이트의 unreviewed.html 페이지 대신 PlanGateModal 톤
+        // 의 native UI 를 보게 됨.
+        navigation.navigate('UnreviewedSummaries');
         return true;
       }
       if (route.pathname === 'billing') {
@@ -135,21 +214,58 @@ export const WebViewHost: React.FC = () => {
   // doesn't actually open the modal more than once a day.
   const [reminderTick, setReminderTick] = useState(0);
 
-  // Returning to foreground does three things:
+  // Returning to foreground does these things:
   //  1) Refresh the native ledger-groups cache (chips up-to-date).
   //  2) Trigger a catch-up scan — if Android put us to sleep and a recent call
   //     ended without PHONE_STATE reaching us, the post-call service runs now
   //     and surfaces the missed recording. Core promise: no call left behind.
   //  3) Re-evaluate the daily reminder for un-sent customer logs.
+  //  4) Health-check the Supabase session — if we've been backgrounded long
+  //     enough that the access_token may have rotted (the 2026-05-19 incident
+  //     was exactly this: 14h sleep → token died → 401 storm). Force a
+  //     pre-emptive refresh so the first API call after wake-up doesn't 401.
+  const lastBackgroundedAtRef = useRef<number>(0);
   useEffect(() => {
     const sub = AppState.addEventListener('change', state => {
-      if (state === 'active' && isLoggedIn()) {
-        void syncLedgerGroupsToNative();
-        void triggerCatchUpScan();
-        setReminderTick(t => t + 1);
+      if (state === 'background') {
+        lastBackgroundedAtRef.current = Date.now();
+        return;
+      }
+      if (state !== 'active') return;
+      if (!isLoggedIn()) return;
+      void syncLedgerGroupsToNative();
+      // 사장님 정책 (2026-05-21): catchUp scan 비활성. 새 흐름은 audio_pending
+      // 자동 저장 → 미확인 요약에서 처리. catchUp 으로 이전 통화녹음 다시
+      // 매칭 → 모달 재표시 = 사장님이 짜증나는 "과거 모달 갑자기 뜸" 의 원인.
+      // void triggerCatchUpScan();
+      // Policy 2: foreground 재진입 = outbox 의 pending 작업 자동 재시도.
+      // 백그라운드에서 발생했던 통화녹음이 401 / 네트워크 실패로 보존됐다면
+      // 이 시점에 자동 drain.
+      void processOutbox('appstate.active');
+      setReminderTick(t => t + 1);
+
+      const backgroundedFor = lastBackgroundedAtRef.current
+        ? Date.now() - lastBackgroundedAtRef.current
+        : 0;
+      const STALE_AFTER_MS = 30 * 60 * 1000; // 30 min
+      if (backgroundedFor > STALE_AFTER_MS && authRef.current) {
+        if (__DEV__) {
+          console.log(
+            '[Session] health check — backgrounded',
+            Math.round(backgroundedFor / 60_000),
+            'min, refreshing',
+          );
+        }
+        logError(
+          'Session.healthCheck',
+          new Error(`backgrounded ${Math.round(backgroundedFor / 60_000)}min — refresh`),
+        );
+        injectSessionRefresh();
       }
     });
     return () => sub.remove();
+    // injectSessionRefresh is defined below — stable callback, ref-based.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // === SESSION REFRESH (MAX STRENGTH) ===========================
@@ -158,23 +274,27 @@ export const WebViewHost: React.FC = () => {
   // refreshes access_token periodically and persists to localStorage under
   // "sb-<project>-auth-token". RN's in-memory cache rots when the app sits
   // idle for hours then gets revived by a native trigger (PostCallScan /
-  // CallScreening / overlay tap), so we must aggressively re-sync.
+  // CallScreening / overlay tap), so we must re-sync.
   //
-  // Strategy: when refresh is requested, fire EVERY recovery path in
-  // parallel and accept whichever delivers first:
-  //   1) Inject JS that reads Supabase session from localStorage and
-  //      re-posts auth.login. Almost instant (<50ms) if WebView is loaded.
-  //   2) Inject JS that calls Supabase refreshSession() to force a new
-  //      access_token (in case localStorage is also stale).
-  //   3) Hard reload WebView so bridge.js handshake re-publishes auth.login
-  //      from scratch. Slower (~2-3s) but always works.
+  // Path A 1번 — single source of truth (웹팀 의뢰, 2026-05-20):
+  //   WebView's Supabase JS is the ONLY refresh actor. RN must not call
+  //   supabase.auth.refreshSession() directly — that creates two refresh
+  //   token consumers, one of which gets invalidated the moment the other
+  //   wins the race (사장님의 "첫 refresh 8.7초 후 즉시 logout" 케이스).
   //
-  // Caller (api/client.ts) waits up to 20 seconds — the longest path is
-  // the reload which usually finishes in ~3s.
+  //   영맨 웹측이 노출한 hook (commit 15f0959):
+  //     window.YoungmanBridge.refreshSession()
+  //     · Promise 반환, _refreshInflight + 25초 cooldown 자동 적용
+  //     · 동시 N건 호출 → 1건으로 합쳐짐, 25초 내 재호출 → 캐시 즉시 반환
+  //     · TOKEN_REFRESHED 이벤트 → _bridgeLogin() → auth.login 메시지로 RN에 전달
+  //
+  // Strategy:
+  //   1) localStorage 빠른 path (Supabase JS가 이미 복원해둔 세션이 있으면 즉시 사용)
+  //   2) YoungmanBridge.refreshSession() 호출 (단일 refresh 주체)
+  //   3) Hard reload 폴백 (둘 다 실패 시. authRef null이면 skip)
   const injectSessionRefresh = useCallback(() => {
     const ref = webViewRef.current;
     if (!ref) return;
-    // (1) + (2): try localStorage AND Supabase refresh in the same script.
     ref.injectJavaScript(`
       (function() {
         var post = function(s) {
@@ -192,35 +312,33 @@ export const WebViewHost: React.FC = () => {
           return true;
         };
         try {
-          // Path A: localStorage read (fast — works if Supabase JS is alive)
+          // (1) Fast path: localStorage read. If Supabase JS already
+          // restored a fresh session (e.g. WebView just reloaded), use
+          // it immediately — no need to wait on refresh round-trip.
           var keys = Object.keys(localStorage || {});
-          var localHit = null;
           for (var i = 0; i < keys.length; i++) {
             var k = keys[i];
             if (k.indexOf('sb-') !== 0 || k.indexOf('-auth-token') < 0) continue;
             var raw = localStorage.getItem(k);
             if (!raw) continue;
-            try { localHit = JSON.parse(raw); } catch (e) {}
-            if (localHit && localHit.access_token) {
-              post(localHit);
+            var s;
+            try { s = JSON.parse(raw); } catch (e) { continue; }
+            if (s && s.access_token) {
+              post(s);
               break;
             }
           }
-          // Path B: force-refresh via Supabase JS if reachable globally
-          var sb = window.supabase || window.supabaseClient || window._supabase
-                 || (window.YoungmanBridge && window.YoungmanBridge.supabase);
-          if (sb && sb.auth && typeof sb.auth.refreshSession === 'function') {
-            sb.auth.refreshSession().then(function(r) {
-              var s = r && r.data && r.data.session;
-              if (s) post(s);
-            }).catch(function() {});
-          }
-          // Path C: ask web-team bridge hook if it exists
+          // (2) Single source of truth: ask the bridge hook to refresh.
+          // 영맨 웹측 _refreshInflight + 25초 cooldown으로 단일 호출 보장.
+          // Result flows back via TOKEN_REFRESHED → _bridgeLogin() →
+          // 'auth.login' postMessage. We do NOT call supabase.auth.refreshSession()
+          // directly here — that's exactly the dual-consumer race that
+          // Path A 1번 fixes.
           if (window.YoungmanBridge && typeof window.YoungmanBridge.refreshSession === 'function') {
             try { window.YoungmanBridge.refreshSession(); } catch (e) {}
           }
         } catch (e) {
-          // swallow — caller has reload fallback
+          // swallow — reload fallback below handles total failure
         }
       })();
       true;
@@ -235,11 +353,69 @@ export const WebViewHost: React.FC = () => {
     const counterAtRequest = sessionUpdateCounterRef.current;
     setTimeout(() => {
       if (sessionUpdateCounterRef.current !== counterAtRequest) {
-        return; // a fresh auth.login already arrived — skip reload
+        // a fresh auth.login already arrived — recovery worked.
+        refreshFailureStreakRef.current = 0;
+        return;
+      }
+      // Logged-out short-circuit: if the user explicitly logged out (or
+      // never logged in this session), reloading the WebView just bounces
+      // them to the login page that's already showing. Skip the reload
+      // entirely and emit the dead-session signal so the UI handler can
+      // decide what to do. This removes the "1 blink on logout" artifact.
+      if (authRef.current == null) {
+        if (__DEV__) {
+          console.log('[Session] logged out — skipping reload, emitting dead');
+        }
+        logError('Session', new Error('logged-out 401 — skipping reload'));
+        DeviceEventEmitter.emit(SESSION_DEAD_EVENT);
+        return;
+      }
+      // Reload cooldown — see lastReloadAtRef comment for why this exists.
+      const sinceLast = Date.now() - lastReloadAtRef.current;
+      const RELOAD_COOLDOWN_MS = 30_000;
+      if (sinceLast < RELOAD_COOLDOWN_MS) {
+        if (__DEV__) {
+          console.log(
+            '[Session] reload cooldown active — skipping (last reload',
+            Math.round(sinceLast / 1000),
+            's ago)',
+          );
+        }
+        return;
+      }
+      // Path A 3번 — recent-success guard. If we received a fresh
+      // auth.login within the last 60s, the session is demonstrably
+      // alive; this timeout is most likely a stale parallel 401 burst
+      // (사장님 케이스: 첫 refresh 8.7초 성공 후 다른 백그라운드 호출의
+      // 뒤늦은 timeout이 SESSION_DEAD를 오발동). Don't escalate.
+      const sinceLastLogin = Date.now() - lastAuthLoginAtRef.current;
+      if (lastAuthLoginAtRef.current > 0 && sinceLastLogin < 60_000) {
+        if (__DEV__) {
+          console.log(
+            '[Session] recent auth.login (',
+            Math.round(sinceLastLogin / 1000),
+            's ago) — ignoring stale refresh timeout',
+          );
+        }
+        return;
+      }
+      // Track failure streak. After several consecutive attempts that never
+      // produced a fresh auth.login, the session is effectively dead and the
+      // user must log in again — emit a signal that the UI listens for.
+      refreshFailureStreakRef.current += 1;
+      if (refreshFailureStreakRef.current >= 2) {
+        if (__DEV__) {
+          console.log(
+            '[Session] refresh failed 3 times — emitting dead-session event',
+          );
+        }
+        DeviceEventEmitter.emit(SESSION_DEAD_EVENT);
+        return;
       }
       if (__DEV__) {
         console.log('[Session] hard fallback — reloading WebView');
       }
+      lastReloadAtRef.current = Date.now();
       webViewRef.current?.reload();
     }, 1_000);
   }, []);
@@ -256,6 +432,174 @@ export const WebViewHost: React.FC = () => {
     );
     return () => sub.remove();
   }, [injectSessionRefresh]);
+
+  // Native fallback refresh has succeeded — push the new tokens into the
+  // WebView so its Supabase JS doesn't run a redundant refresh and stays
+  // consistent with the in-memory RN session. Best-effort: older site
+  // builds without `window.YoungmanBridge.setSession` will silently no-op.
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(
+      SESSION_SYNC_TO_WEBVIEW_EVENT,
+      (auth: AuthLoginPayload) => {
+        const ref = webViewRef.current;
+        if (!ref || !auth) return;
+        if (__DEV__) {
+          console.log('[Session] syncing native-refreshed tokens to WebView');
+        }
+        // Send tokens as a JSON-encoded literal so any special characters
+        // are escaped safely.
+        const payloadJson = JSON.stringify({
+          accessToken: auth.accessToken,
+          refreshToken: auth.refreshToken,
+          expiresAt: auth.expiresAt,
+        });
+        ref.injectJavaScript(`
+          (function() {
+            try {
+              var p = ${payloadJson};
+              if (window.YoungmanBridge && typeof window.YoungmanBridge.setSession === 'function') {
+                window.YoungmanBridge.setSession(p);
+              } else if (window.supabase && window.supabase.auth && typeof window.supabase.auth.setSession === 'function') {
+                window.supabase.auth.setSession({
+                  access_token: p.accessToken,
+                  refresh_token: p.refreshToken
+                });
+              }
+            } catch (e) {}
+          })();
+          true;
+        `);
+      },
+    );
+    return () => sub.remove();
+  }, []);
+
+  // Show a one-shot "log in again" alert when auto-recovery has given up.
+  // The flag prevents the alert from re-triggering every time another
+  // background API call hits 401 in quick succession (which is exactly what
+  // happens after a logout — see the infinite-reload incident).
+  const sessionDeadShownRef = useRef<boolean>(false);
+  // Cold-start grace period (사장님 정책 2026-05-21): app 시작 첫 15초는
+  // SESSION_DEAD alert 표시 금지. WebView 가 페이지 fetch + Supabase JS 실행 +
+  // auth.login post 까지 3-5초 걸리는 동안 API 호출이 401 나면 SESSION_DEAD 가
+  // emit 되는데, 이때 alert 띄우면 자동로그인 도중에 사용자가 "세션이 만료
+  // 되었습니다" 알림창을 매번 봐야 함. 15초면 자동로그인 99% case 가 완료됨.
+  // 그 이후에도 SESSION_DEAD 나면 진짜 죽은 세션 → alert 정당.
+  const appStartedAtRef = useRef<number>(Date.now());
+  const COLD_START_GRACE_MS = 15_000;
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(SESSION_DEAD_EVENT, () => {
+      if (sessionDeadShownRef.current) return;
+      const sinceStart = Date.now() - appStartedAtRef.current;
+      if (sinceStart < COLD_START_GRACE_MS) {
+        if (__DEV__) {
+          console.log(
+            '[Session] SESSION_DEAD within cold-start grace (',
+            Math.round(sinceStart / 1000),
+            's) — suppressing alert',
+          );
+        }
+        return;
+      }
+      sessionDeadShownRef.current = true;
+      Alert.alert(
+        '다시 로그인이 필요해요',
+        '세션이 만료되었습니다. 로그인 화면으로 이동할까요?',
+        [
+          {
+            text: '나중에',
+            style: 'cancel',
+            onPress: () => {
+              // Allow the prompt to fire again later, but only after a
+              // grace period — otherwise the next background 401 burst
+              // pops this alert immediately.
+              setTimeout(() => {
+                sessionDeadShownRef.current = false;
+              }, 60_000);
+            },
+          },
+          {
+            text: '로그인',
+            onPress: () => {
+              // Navigate the WebView to the site root. The web team's
+              // page renders the login form when there's no session, so
+              // this gets the user back into a clean state.
+              webViewRef.current?.injectJavaScript(
+                `try { window.location.href = ${JSON.stringify(WEB_BASE_URL)}; } catch (e) {} true;`,
+              );
+              // Don't reset the flag yet — let onAuthLogin reset everything
+              // when the new login completes.
+            },
+          },
+        ],
+      );
+    });
+    return () => sub.remove();
+  }, []);
+
+  // AUTO_SUBMIT_AUTH_FAIL_FLAG = headless 가 hard auth fail (refresh_token
+  // 자체 무효) 만났을 때만 세팅. 그땐 SESSION_DEAD 모달 정당.
+  //
+  // AUTO_SUBMIT_PENDING_FLAG = headless 가 auth_pending 만났을 때 (영맨
+  // 로그인 미완료 / refreshToken 누락). 사장님 정책 1 (2026-05-20): 사용자에게
+  // 401 노출 금지 + outbox 에 보존되어 자동 재시도 예정 → 친절한 toast 만 표시.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const hardFail = await AsyncStorage.getItem(AUTO_SUBMIT_AUTH_FAIL_FLAG);
+        if (hardFail) {
+          await AsyncStorage.removeItem(AUTO_SUBMIT_AUTH_FAIL_FLAG);
+          logError(
+            'AutoSubmit',
+            new Error('auth-fail flag found on foreground → surface modal'),
+          );
+          DeviceEventEmitter.emit(SESSION_DEAD_EVENT);
+          return;
+        }
+        const pending = await AsyncStorage.getItem(AUTO_SUBMIT_PENDING_FLAG);
+        if (pending) {
+          await AsyncStorage.removeItem(AUTO_SUBMIT_PENDING_FLAG);
+          logError(
+            'AutoSubmit',
+            new Error('pending_auth flag found on foreground → friendly toast'),
+          );
+          if (Platform.OS === 'android') {
+            ToastAndroid.showWithGravity(
+              '세션을 준비 중입니다. 곧 자동으로 이어서 처리됩니다.',
+              ToastAndroid.LONG,
+              ToastAndroid.CENTER,
+            );
+          }
+        }
+      } catch {
+        // best-effort
+      }
+    })();
+  }, []);
+
+  // Hand-off from the AutoSubmit headless task to the in-memory jobStore.
+  // Headless can't touch jobStore directly, so it persisted the job to
+  // AsyncStorage and we pick it up here on mount + every foreground entry.
+  // Idempotent — jobStore ignores set calls for an already-active job id.
+  useEffect(() => {
+    const adoptPending = async () => {
+      try {
+        const raw = await AsyncStorage.getItem(PENDING_JOB_KEY);
+        if (!raw) return;
+        const pending = JSON.parse(raw) as PendingJobPayload;
+        await AsyncStorage.removeItem(PENDING_JOB_KEY);
+        if (getActiveJob()?.jobId === pending.jobId) return;
+        setActiveJob(pending.jobId, pending.metadata);
+      } catch {
+        // ignore — malformed payload just gets dropped
+      }
+    };
+    void adoptPending();
+    const sub = AppState.addEventListener('change', state => {
+      if (state === 'active') void adoptPending();
+    });
+    return () => sub.remove();
+  }, []);
 
   // Whenever the WebView finishes loading, pre-emptively pull the current
   // Supabase session out of localStorage. This keeps RN's cache fresh
@@ -298,6 +642,37 @@ export const WebViewHost: React.FC = () => {
     `);
   }, [webViewReady]);
 
+  // 사장님 정책 (2026-05-21): cafe24 페이지의 "미확인 요약" 메뉴 항목에 빨간
+  // badge 표시. RN 측에서 list_unreviewed count 폴링 후 WebView 에 inject.
+  // 웹팀은 window.YoungmanBridge.setUnreviewedCount(N) 받으면 메뉴 항목에
+  // badge UI 렌더 (커밋 협의 필요).
+  useEffect(() => {
+    if (!webViewReady) return;
+    let stopped = false;
+    const sync = async () => {
+      if (stopped || !isLoggedIn()) return;
+      const count = await fetchUnreviewedCount();
+      if (stopped) return;
+      webViewRef.current?.injectJavaScript(`
+        (function() {
+          try {
+            if (window.YoungmanBridge && typeof window.YoungmanBridge.setUnreviewedCount === 'function') {
+              window.YoungmanBridge.setUnreviewedCount(${count});
+            }
+          } catch (e) {}
+        })();
+        true;
+      `);
+    };
+    // 즉시 1회 + 30초마다.
+    void sync();
+    const id = setInterval(() => { void sync(); }, 30_000);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, [webViewReady]);
+
   const onNavigationStateChange = useCallback((nav: WebViewNavigation) => {
     setCanGoBack(nav.canGoBack);
     if (__DEV__) {
@@ -321,13 +696,25 @@ export const WebViewHost: React.FC = () => {
   const onAuthLogin = useCallback((auth: AuthLoginPayload) => {
     authRef.current = auth;
     sessionUpdateCounterRef.current += 1;
+    // Fresh login arrived — reset 401 recovery throttles so a genuine future
+    // token expiry can re-trigger the full recovery flow again.
+    refreshFailureStreakRef.current = 0;
+    lastReloadAtRef.current = 0;
+    sessionDeadShownRef.current = false;
+    lastAuthLoginAtRef.current = Date.now();
+    // 사장님 정책 (2026-05-20 late): Auth.login 은 정상 이벤트. errors.log 에
+    // 기록하면 사용자가 "에러" 로 인지. dev console 만.
     if (__DEV__) {
       console.log('[Auth] login', auth.userId, auth.email);
     }
+    // Policy 2 (2026-05-20): 로그인 완료 = outbox 의 pending_auth 작업
+    // 모두 자동 재시도. 사장님 슬로건 "단 한 건의 누락도 없이 관리" 보장.
+    void processOutbox('auth.login');
   }, []);
 
   const onAuthLogout = useCallback(() => {
     authRef.current = null;
+    // 정상 이벤트 — errors.log 기록 X. dev console 만.
     if (__DEV__) {
       console.log('[Auth] logout');
     }
@@ -408,7 +795,7 @@ export const WebViewHost: React.FC = () => {
     // system navigation bar. The WebView painting through to the screen edge
     // matches the mobile-browser experience that the web team designs against.
     <SafeAreaView style={styles.container} edges={['top']}>
-      <BackgroundPermissionBanner />
+      <PermissionBanner />
       <UsageBanner />
       <View style={styles.flex}>
         <WebView
@@ -452,6 +839,7 @@ export const WebViewHost: React.FC = () => {
       </View>
       <PendingReminderModal triggerKey={reminderTick} />
       <TrialIntroModal />
+      <PlanGateModal />
     </SafeAreaView>
   );
 };

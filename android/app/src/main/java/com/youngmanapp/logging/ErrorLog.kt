@@ -57,6 +57,33 @@ object ErrorLog {
     }
   }
 
+  /**
+   * Read only the most recent N bytes — used to keep the RN bridge transfer
+   * under the 1MB binder limit (TransactionTooLargeException at ~1MB). The
+   * first partial line is trimmed so the result starts cleanly. 500KB ≈
+   * 1000 log lines, which is plenty for a 24h monitoring window.
+   */
+  fun readTail(ctx: Context, maxBytes: Int = 500_000): String {
+    return try {
+      val file = File(ctx.filesDir, "errors.log")
+      if (!file.exists()) return ""
+      val len = file.length()
+      if (len <= maxBytes) return file.readText()
+      java.io.RandomAccessFile(file, "r").use { raf ->
+        raf.seek(len - maxBytes)
+        val buf = ByteArray(maxBytes)
+        raf.readFully(buf)
+        val text = String(buf, Charsets.UTF_8)
+        val firstNewline = text.indexOf('\n')
+        val trimmed =
+            if (firstNewline >= 0) text.substring(firstNewline + 1) else text
+        "(… 앞부분 생략 — 최근 ${maxBytes / 1024}KB만 표시 …)\n$trimmed"
+      }
+    } catch (e: Exception) {
+      "(ErrorLog readTail failed: ${e.message})"
+    }
+  }
+
   fun clear(ctx: Context) {
     try {
       File(ctx.filesDir, "errors.log").delete()

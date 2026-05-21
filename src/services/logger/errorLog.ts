@@ -3,6 +3,7 @@ import { NativeModules, Platform } from 'react-native';
 interface NativeErrorLog {
   append(tag: string, message: string): void;
   read(): Promise<string>;
+  readTail(maxBytes: number): Promise<string>;
   clear(): Promise<void>;
 }
 
@@ -59,6 +60,22 @@ export async function readErrorLog(): Promise<string> {
   }
   try {
     return await native.read();
+  } catch {
+    return '';
+  }
+}
+
+/** Read only the tail of the log (default 500KB) — used by the in-app
+ *  viewer to stay safely under the 1MB RN bridge / Android clipboard
+ *  limits. Older lines are dropped, the first partial line trimmed. */
+export async function readErrorLogTail(
+  maxBytes: number = 500_000,
+): Promise<string> {
+  if (Platform.OS !== 'android' || !native) {
+    return '';
+  }
+  try {
+    return await native.readTail(maxBytes);
   } catch {
     return '';
   }

@@ -6,6 +6,7 @@ import android.util.Log
 import com.facebook.react.ReactApplication
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.youngmanapp.auth.CustomerLogClient
+import com.youngmanapp.billing.PlanCache
 import com.youngmanapp.overlay.IncomingCallOverlayService
 import com.youngmanapp.settings.SettingsStore
 
@@ -48,24 +49,38 @@ class YoungmanCallScreeningService : CallScreeningService() {
       return
     }
 
-    val number = callDetails.handle?.schemeSpecificPart ?: return
-    Log.d(TAG, "incoming RINGING from $number")
-
-    // Fast path: if the RN bridge is already loaded, hand off to its
-    // in-memory customer_log cache. That cache is warmed at app start and on
-    // every foreground entry, so the lookup is ~50ms — banner shows up
-    // before the second ring.
-    //
-    // Slow path (RN not loaded yet — cold process start triggered by the
-    // call itself): fall back to a native HTTP lookup. Worker thread so we
-    // don't block onScreenCall.
-    if (isRnAlive()) {
-      Log.d(TAG, "RN alive — emit to JS for in-memory lookup")
-      emitToRn(number)
+    // Plan gate (native side). The pre-call banner is bundled with the
+    // post-call AI summary as one billable unit — free / quota-exhausted
+    // users see neither. Fail-CLOSED: if no plan snapshot is cached, do not
+    // surface the banner. RN syncs the cache on every profile refresh.
+    if (!PlanCache.canShowIncomingCallModal(this)) {
+      Log.d(TAG, "plan gate closed — skip incoming banner")
       return
     }
 
-    Log.d(TAG, "RN not loaded — native HTTP lookup")
+    val number = callDetails.handle?.schemeSpecificPart ?: return
+    Log.d(TAG, "incoming RINGING from $number")
+
+    // Dual-path lookup (2026-05-20 race fix):
+    //  - RN path: emit if alive. RN's in-memory customer_log cache wins when
+    //    fresh — banner shows in ~50ms.
+    //  - Native HTTP path: ALWAYS run in parallel. Two scenarios benefit:
+    //      (1) RN is dead/cold — only path that can surface the banner.
+    //      (2) RN is alive but blocked on session refresh / network — native
+    //          path wins the race and shows the banner first.
+    //  IncomingCallOverlayService.showOverlay is idempotent (reuses existing
+    //  view), so both paths racing to show() yields a single banner — the
+    //  loser just updates the text content of the existing view.
+    if (isRnAlive()) {
+      Log.d(TAG, "RN alive — emit to JS (in-memory lookup)")
+      emitToRn(number)
+    } else {
+      Log.d(TAG, "RN not loaded — native HTTP path only")
+    }
+
+    // Always also run the native HTTP path. Even when RN is alive, this is
+    // our safety net against the 사장님 94분 background → first call case
+    // where RN's refreshCache() got blocked behind a session refresh.
     Thread {
       val match = CustomerLogClient.findByPhone(applicationContext, number)
       if (match != null) {

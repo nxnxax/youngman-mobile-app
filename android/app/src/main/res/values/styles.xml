@@ -6,12 +6,22 @@
         <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
     </style>
 
-    <!-- Launch theme: handled by androidx.core:core-splashscreen.
-         Shown during cold start, then swapped to AppTheme by installSplashScreen(). -->
+    <!-- 사장님 정책 (v38 2026-05-23): LaunchTheme 를 흰 배경 + 캐릭터 splash 로.
+         통화 후 흐름 = CallPostActivity 흰 풀스크린 native loading → 영맨앱 cold
+         start (이 splash) → ConfirmRecording 흰 풀스크린 LoadingSecretary. 셋
+         다 흰 배경이라 사장님 "번쩍" 인지 X. splash icon 으로 같은 캐릭터 PNG.
+         postSplashScreenTheme 도 흰 배경 강제 (AppThemeWhite) — splash 끝 후
+         RN mount 전 빈 화면도 흰색 유지. -->
     <style name="LaunchTheme" parent="Theme.SplashScreen">
-        <item name="windowSplashScreenBackground">@color/app_brand</item>
-        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
-        <item name="postSplashScreenTheme">@style/AppTheme</item>
+        <item name="windowSplashScreenBackground">@android:color/white</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/loading_secretary</item>
+        <item name="postSplashScreenTheme">@style/AppThemeWhite</item>
+    </style>
+
+    <!-- AppTheme + 흰 windowBackground 강제. splash → RN mount 사이 빈 화면이
+         흰색이 되도록. -->
+    <style name="AppThemeWhite" parent="AppTheme">
+        <item name="android:windowBackground">@android:color/white</item>
     </style>
 
 </resources>

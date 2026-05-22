@@ -121,7 +121,7 @@
             android:layout_height="28dp"
             android:layout_gravity="top|end"
             android:layout_marginEnd="16dp"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="48dp"
             android:background="@drawable/loading_close_bg"
             android:gravity="center"
             android:text="×"

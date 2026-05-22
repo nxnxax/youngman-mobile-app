@@ -194,7 +194,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
   loadingCloseTopRight: {
     position: 'absolute',
-    top: 16,
+    // 사장님 정책 (v38 2026-05-23): 상단바 겹침 fix.
+    top: 32,
     right: 16,
     width: 28,
     height: 28,

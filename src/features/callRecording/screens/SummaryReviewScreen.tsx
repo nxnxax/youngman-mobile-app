@@ -658,7 +658,9 @@ const styles = StyleSheet.create({
   },
   loadingCloseTopRight: {
     position: 'absolute',
-    top: 16,
+    // 사장님 정책 (v38 2026-05-23): 상단바 겹침 fix. SafeAreaView edges=top
+    // 안이지만 추가 여백으로 더 아래로.
+    top: 32,
     right: 16,
     width: 28,
     height: 28,

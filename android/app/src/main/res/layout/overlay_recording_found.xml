@@ -4,12 +4,139 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/overlay_root"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:paddingHorizontal="40dp">
+    android:layout_height="match_parent">
+
+    <!-- 사장님 정책 (v37 2026-05-23): 흰 풀스크린 loading. 풀스크린 흰 배경
+         + 캐릭터/별/로딩바/텍스트 가운데. v34 native loading_card 부활하되
+         사장님 디자인 명시 (흰 배경) 반영. CallPostActivity click 시 즉시
+         normal_card → loading_card 토글 (16ms 안 반응). -->
+    <FrameLayout
+        android:id="@+id/overlay_loading_card"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#FFFFFF"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:paddingHorizontal="28dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="AI 요약중..."
+                android:textColor="#1F1F23"
+                android:textSize="21sp"
+                android:textStyle="bold"
+                android:letterSpacing="-0.03"
+                android:layout_marginBottom="8dp" />
+
+            <FrameLayout
+                android:id="@+id/loading_character_wrap"
+                android:layout_width="165dp"
+                android:layout_height="165dp">
+
+                <ImageView
+                    android:id="@+id/loading_character_image"
+                    android:layout_width="165dp"
+                    android:layout_height="165dp"
+                    android:src="@drawable/loading_secretary"
+                    android:scaleType="fitCenter"
+                    android:contentDescription="loading" />
+
+                <TextView
+                    android:id="@+id/loading_star_1"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|start"
+                    android:layout_marginStart="13dp"
+                    android:layout_marginTop="8dp"
+                    android:text="✨"
+                    android:textSize="22sp"
+                    android:alpha="0" />
+
+                <TextView
+                    android:id="@+id/loading_star_2"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|end"
+                    android:layout_marginEnd="17dp"
+                    android:layout_marginTop="17dp"
+                    android:text="✨"
+                    android:textSize="22sp"
+                    android:alpha="0" />
+
+                <TextView
+                    android:id="@+id/loading_star_3"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="bottom|end"
+                    android:layout_marginEnd="8dp"
+                    android:layout_marginBottom="33dp"
+                    android:text="✨"
+                    android:textSize="22sp"
+                    android:alpha="0" />
+            </FrameLayout>
+
+            <FrameLayout
+                android:layout_width="205dp"
+                android:layout_height="4dp"
+                android:layout_marginTop="14dp"
+                android:background="@drawable/loading_bar_track"
+                android:clipChildren="true">
+
+                <View
+                    android:id="@+id/loading_bar_indicator"
+                    android:layout_width="72dp"
+                    android:layout_height="4dp"
+                    android:background="@drawable/loading_bar_indicator" />
+            </FrameLayout>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="잠시만 기다려주세요"
+                android:textColor="#1F1F23"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:letterSpacing="-0.03" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="내용을 정리하고 있어요"
+                android:textColor="#7A7A80"
+                android:textSize="13sp"
+                android:letterSpacing="-0.02" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/loading_close_btn"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_gravity="top|end"
+            android:layout_marginEnd="16dp"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/loading_close_bg"
+            android:gravity="center"
+            android:text="×"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp"
+            android:clickable="true"
+            android:focusable="true" />
+    </FrameLayout>
 
     <androidx.cardview.widget.CardView
+        android:id="@+id/overlay_normal_card"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginHorizontal="40dp"
+        android:layout_gravity="center"
         app:cardCornerRadius="14dp"
         app:cardElevation="10dp"
         app:cardBackgroundColor="#FFFFFF"

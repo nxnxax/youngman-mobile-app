@@ -11,6 +11,10 @@ import {
   setSession,
 } from '../../../services/auth/session';
 import {
+  clearExplicitlyLoggedOut,
+  setExplicitlyLoggedOut,
+} from '../../../services/auth/loggedOutFlag';
+import {
   runGoogleSignIn,
   runGoogleSignOut,
 } from '../../auth/googleSignIn';
@@ -158,6 +162,9 @@ export async function handleBridgeMessage(
           );
         }
         setSession(auth);
+        // 사장님 정책 (2026-05-22 "찰거머리"): 로그인 성공 = "명시적 로그아웃"
+        // 상태 해제. 다음 토큰 만료 시 silent re-auth 자동 발동 허용.
+        void clearExplicitlyLoggedOut();
         ctx.onAuthLogin(auth);
         // Fire-and-forget: populate the native ledger-groups cache so the
         // post-call glass overlay can render the chip selector immediately.
@@ -190,6 +197,10 @@ export async function handleBridgeMessage(
       // refresh from the previous session could block the next login's
       // first refresh attempt.
       resetRefreshMutex();
+      // 사장님 정책 (2026-05-22 "찰거머리"): 사용자가 의도적으로 로그아웃했다.
+      // silent re-auth 가 다음 토큰 만료 시 자동으로 재로그인시키면 사장님 의도
+      // 위배. 명시적 로그아웃 플래그를 켜서 silent 자동 시도 차단.
+      void setExplicitlyLoggedOut();
       // Unregister BEFORE clearing the session — apiPost needs the JWT.
       void unregisterFcmTokenWithServer().finally(() => {
         clearSession();

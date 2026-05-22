@@ -14,13 +14,13 @@ class IncomingCallOverlayModule(reactContext: ReactApplicationContext) :
 
   @ReactMethod
   fun show(customerLabel: String, summary: String, promise: Promise) {
-    IncomingCallOverlayService.show(reactApplicationContext, customerLabel, summary)
+    IncomingCallNotifier.show(reactApplicationContext, customerLabel, summary)
     promise.resolve(null)
   }
 
   @ReactMethod
   fun dismiss(promise: Promise) {
-    IncomingCallOverlayService.dismiss(reactApplicationContext)
+    IncomingCallNotifier.dismiss(reactApplicationContext)
     promise.resolve(null)
   }
 

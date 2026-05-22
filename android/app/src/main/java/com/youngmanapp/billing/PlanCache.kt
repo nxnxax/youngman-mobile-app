@@ -25,6 +25,11 @@ object PlanCache {
   private const val PREFS = "youngman_plan_v1"
   private const val KEY_JSON = "plan_json"
 
+  /** 사장님 정책 (2026-05-21): Play Store 정식 출시 + 결제사 승인 전까지 모든
+   *  사용자 무료. plan 게이트 자체 비활성. 결제 시스템 복원 시 true 로 토글하면
+   *  옛 free/quota 차단 로직 자동 복원. RN env.ts 의 TESTER_MODE 와 짝. */
+  private const val ENFORCE_PLAN_GATE = false
+
   fun write(ctx: Context, json: String) {
     try {
       ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -55,6 +60,7 @@ object PlanCache {
    *  glimpse the banner once before RN's gate kicks in. The next foreground
    *  pass syncs the cache and subsequent calls follow the cache verdict. */
   fun canShowIncomingCallModal(ctx: Context): Boolean {
+    if (!ENFORCE_PLAN_GATE) return true
     val o = readJson(ctx) ?: return true
     val plan = o.optString("plan", "free")
     val status = o.optString("plan_status", "")

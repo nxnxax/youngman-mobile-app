@@ -55,9 +55,9 @@ class LockScreenLauncherActivity : Activity() {
         putExtra(OverlayService.EXTRA_MIME, mimeType)
       }
       try {
-        startService(svc)
+        androidx.core.content.ContextCompat.startForegroundService(this, svc)
       } catch (e: Throwable) {
-        Log.w(TAG, "startService(OverlayService) failed", e)
+        Log.w(TAG, "startForegroundService(OverlayService) failed", e)
       }
     }
 

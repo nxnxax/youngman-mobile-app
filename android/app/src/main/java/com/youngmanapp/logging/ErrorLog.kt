@@ -26,8 +26,10 @@ object ErrorLog {
       SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
 
   fun append(ctx: Context, tag: String, message: String, throwable: Throwable? = null) {
+    // 사장님 진단 (2026-05-22 PM): ErrorLog file 항상 비어있음 보고. file write
+    // 흐름 logcat 으로 추적.
+    val file = File(ctx.filesDir, "errors.log")
     try {
-      val file = File(ctx.filesDir, "errors.log")
       val sb = StringBuilder()
       sb.append(ts.format(Date()))
       sb.append(" [").append(tag).append("] ")
@@ -37,6 +39,10 @@ object ErrorLog {
       }
       sb.append('\n')
       file.appendText(sb.toString())
+      Log.d(
+        "ErrorLog",
+        "append OK tag=$tag bytes=${sb.length} file=${file.absolutePath} size=${file.length()}",
+      )
 
       if (file.length() > MAX_BYTES) {
         val rotated = File(ctx.filesDir, "errors.old.log")
@@ -44,7 +50,11 @@ object ErrorLog {
         file.renameTo(rotated)
       }
     } catch (e: Exception) {
-      Log.e("ErrorLog", "failed to write error log", e)
+      Log.e(
+        "ErrorLog",
+        "append FAIL tag=$tag file=${file.absolutePath} canWrite=${file.canWrite()} parentExists=${file.parentFile?.exists()}",
+        e,
+      )
     }
   }
 

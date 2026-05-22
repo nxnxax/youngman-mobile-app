@@ -37,6 +37,26 @@ export async function deleteCustomerLog(
   });
 }
 
+/** 사장님 정책 (2026-05-22 웹팀 commit 671177e): 통화 취소 / 요약 폐기 시 server
+ *  cascade 삭제 (customer_log + recording_jobs + ledger_records mirror + audio
+ *  파일). 잔해 데이터 누적 방지. callback 은 UPDATE only 라 Railway worker 가
+ *  처리 중이라도 안전 (silent 무시). */
+interface CancelResponse {
+  status: 'ok';
+  deleted: {
+    customer_log: number;
+    recording_jobs: number;
+    ledger_records: number;
+    audio_files: number;
+  };
+}
+export async function cancelCustomerLog(id: string): Promise<CancelResponse> {
+  return apiPost<CancelResponse>('/records.php?resource=customer-log', {
+    action: 'customer_log_cancel',
+    id,
+  });
+}
+
 export async function listCustomerLogs(
   opts: { limit?: number; before?: string | null } = {},
 ): Promise<ListResponse> {

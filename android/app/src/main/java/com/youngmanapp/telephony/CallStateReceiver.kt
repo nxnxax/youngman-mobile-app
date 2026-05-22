@@ -6,7 +6,10 @@ import android.content.Intent
 import android.telephony.TelephonyManager
 import android.util.Log
 import android.provider.Settings
-import com.youngmanapp.overlay.IncomingCallOverlayService
+import androidx.core.content.ContextCompat
+import com.youngmanapp.overlay.CallPostActivity
+import com.youngmanapp.overlay.IncomingCallNotifier
+import com.youngmanapp.overlay.ModalController
 import com.youngmanapp.overlay.OverlayService
 import com.youngmanapp.settings.SettingsStore
 
@@ -37,7 +40,7 @@ class CallStateReceiver : BroadcastReceiver() {
     // surfaced by YoungmanCallScreeningService, which has access to the
     // caller number; we just clean up here.
     if (previous == TelephonyManager.EXTRA_STATE_RINGING && state != previous) {
-      IncomingCallOverlayService.dismiss(context)
+      IncomingCallNotifier.dismiss(context)
     }
 
     // 사장님 정책 (2026-05-21): 통화 시작 (RINGING/IDLE → OFFHOOK) 시점에
@@ -54,19 +57,18 @@ class CallStateReceiver : BroadcastReceiver() {
         return
       }
       Log.d(TAG, "call ended (OFFHOOK -> IDLE), starting scan + placeholder modal")
-      // 사장님 정책 (2026-05-21 구조 변경): 통화 끊자마자 즉시 모달 (placeholder).
-      // PostCallScanService 매칭 후 data 채워짐. 시각적 "끊자마자 모달".
-      if (canDrawOverlay(context)) {
-        val placeholderIntent = Intent(context, OverlayService::class.java).apply {
-          putExtra(OverlayService.EXTRA_PLACEHOLDER, true)
-        }
-        try {
-          context.startService(placeholderIntent)
-        } catch (e: Throwable) {
-          Log.w(TAG, "placeholder overlay start failed", e)
-        }
-      }
-      PostCallScanService.start(context)
+      // 사장님 정책 (2026-05-22 §2 alive FGS): broadcast receiver context 의
+      // startActivity 는 background launch 차단됨. 모든 Activity 시작은 이미
+      // FGS 상태인 PostCallScanService 가 담당. CallStateReceiver 는 ModalController
+      // 의 call_id 만 설정 + scan service 시작.
+      val callId = "call-${System.currentTimeMillis()}"
+      ModalController.begin(callId)
+      // 사장님 정책 (2026-05-22 PM 깜빡임 fix): 양보 FullScreenIntent 제거.
+      // v19 manifest 의 POST_CALL action filter (system uid=1000 자동 launch)
+      // 가 placeholder 모달의 1차 주체. CallStateReceiver 가 또 발행하면 같은
+      // 통화에 알림 + 모달이 2-3번 깜빡임 (사장님 v22 PoC). PostCallScanService
+      // 는 file 매칭 후 data update (onNewIntent) 만 담당.
+      PostCallScanService.startWithPlaceholder(context, callId)
     }
   }
 

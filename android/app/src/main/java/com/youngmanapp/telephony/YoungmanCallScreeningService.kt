@@ -7,7 +7,7 @@ import com.facebook.react.ReactApplication
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.youngmanapp.auth.CustomerLogClient
 import com.youngmanapp.billing.PlanCache
-import com.youngmanapp.overlay.IncomingCallOverlayService
+import com.youngmanapp.overlay.IncomingCallNotifier
 import com.youngmanapp.settings.SettingsStore
 
 /**
@@ -44,8 +44,13 @@ class YoungmanCallScreeningService : CallScreeningService() {
       return
     }
 
-    if (!SettingsStore.read(this).realtimeDetection) {
+    val settings = SettingsStore.read(this)
+    if (!settings.realtimeDetection) {
       Log.d(TAG, "realtimeDetection off — skip")
+      return
+    }
+    if (!settings.incomingCallPopupEnabled) {
+      Log.d(TAG, "incomingCallPopupEnabled off — skip")
       return
     }
 
@@ -88,7 +93,7 @@ class YoungmanCallScreeningService : CallScreeningService() {
             match.customerName?.takeIf { it.isNotBlank() } ?: number
         val label = "$displayName (${match.callCount}번째 통화)"
         val summary = shortSummary(match.summary)
-        IncomingCallOverlayService.show(applicationContext, label, summary)
+        IncomingCallNotifier.show(applicationContext, label, summary)
       }
     }.start()
   }

@@ -14,6 +14,11 @@ class ErrorLogModule(reactContext: ReactApplicationContext) :
 
   @ReactMethod
   fun append(tag: String, message: String) {
+    // 사장님 진단 (2026-05-22 PM): JS 의 logError() → native module 도달 확인용.
+    android.util.Log.d(
+      "ErrorLogModule",
+      "JS append() received tag=$tag msgLen=${message.length}",
+    )
     ErrorLog.append(reactApplicationContext, tag, message)
   }
 

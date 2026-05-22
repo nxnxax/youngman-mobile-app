@@ -23,6 +23,8 @@ object SettingsStore {
       val popupFrequency: String, // "always" | "formal" | "keyword"
       val keywords: String,
       val realtimeDetection: Boolean,
+      val incomingCallPopupEnabled: Boolean,
+      val incomingCallPopupDurationSec: Int,
   ) {
     val modalDwellMs: Long get() = modalDwellSec * 1000L
   }
@@ -34,6 +36,8 @@ object SettingsStore {
           popupFrequency = "always",
           keywords = "사장님, 사모님",
           realtimeDetection = true,
+          incomingCallPopupEnabled = true,
+          incomingCallPopupDurationSec = 10,
       )
 
   fun write(ctx: Context, json: String) {
@@ -60,6 +64,14 @@ object SettingsStore {
           popupFrequency = o.optString("popupFrequency", DEFAULT.popupFrequency),
           keywords = o.optString("keywords", DEFAULT.keywords),
           realtimeDetection = o.optBoolean("realtimeDetection", DEFAULT.realtimeDetection),
+          incomingCallPopupEnabled = o.optBoolean(
+              "incomingCallPopupEnabled",
+              DEFAULT.incomingCallPopupEnabled,
+          ),
+          incomingCallPopupDurationSec = o.optInt(
+              "incomingCallPopupDurationSec",
+              DEFAULT.incomingCallPopupDurationSec,
+          ),
       )
     } catch (e: Exception) {
       Log.w(TAG, "read failed", e)

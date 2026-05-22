@@ -75,10 +75,10 @@ export function useJobPolling(): void {
           return;
         }
       } catch (e) {
-        // 401 / 403 / network — keep polling but slow down. 401 recovery
-        // is handled inside the api client; if the session is truly dead,
-        // the SESSION_DEAD modal fires and Path B (cron worker) finishes
-        // the job server-side. We just bail to FCM mode.
+        // 401 / 403 / network — bail to FCM mode. 401 recovery is handled
+        // inside the api client; if the session is truly dead, the WebView
+        // surfaces login on its own and Path B (cron worker) finishes the
+        // job server-side.
         if (e instanceof ApiError && (e.httpStatus === 401 || e.httpStatus === 403)) {
           // 사장님 정책 (2026-05-21 근본 원인): 401/403 hand-off 시도 jobStore clear.
           // FloatingProcessingCard sticky 방지. 결과는 FCM / 미확인 요약에서.

@@ -29,14 +29,20 @@ import {
 } from '../../../services/billing/billingStore';
 import { showPlanGate } from '../../../services/billing/gating';
 import { processRecording } from '../api/processRecording';
-import { sendCustomerLogToGroup } from '../api/records';
+import {
+  cancelCustomerLog,
+  getCustomerLog,
+  sendCustomerLogToGroup,
+} from '../api/records';
 import type {
   CustomerLogPatch,
   CustomerLogRow,
   LedgerGroup,
 } from '../api/types';
 import { ApiError } from '../../../services/api/client';
+import { logError } from '../../../services/logger/errorLog';
 import { showSuccessOverlay } from '../../../services/overlay/showSuccessOverlay';
+import { LoadingSecretary } from '../components/LoadingSecretary';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'SummaryReview'>;
 type Route = RouteProp<RootStackParamList, 'SummaryReview'>;
@@ -147,6 +153,15 @@ export const SummaryReviewScreen: React.FC = () => {
   // 가 바뀌면 fresh start — 이전 통화 잔재 표시 차단. deps 에 reqId 포함.
   // ref guard 는 strict mode double-invoke 방지용.
   const pendingReqId = params.pendingJob?.client_request_id;
+  // 사장님 정책 (2026-05-22 PM race 진단): T5 = SummaryReview mount.
+  // CallPostActivity 의 T4 (review click) 와 비교해 RN navigation latency 측정.
+  useEffect(() => {
+    logError(
+      'raceTrace',
+      new Error(`T5 SummaryReview mount ts=${Date.now()}`),
+    );
+  }, []);
+
   useEffect(() => {
     if (!params.pendingJob || params.customerLog) return;
     if (startedRef.current === pendingReqId) return;  // 같은 reqId 재진입 dedup
@@ -159,7 +174,14 @@ export const SummaryReviewScreen: React.FC = () => {
     let cancelled = false;
     (async () => {
       try {
+        const t1 = Date.now();
+        logError('raceTrace', new Error(`T1 processRecording call ts=${t1}`));
         const res = await processRecording(params.pendingJob!);
+        const t2 = Date.now();
+        logError(
+          'raceTrace',
+          new Error(`T2 processRecording response ts=${t2} elapsed=${t2 - t1}ms`),
+        );
         if (cancelled) return;
         // server 가 dedup 으로 다른 통화의 customer_log 반환하는 케이스 차단.
         // 응답의 client_request_id 가 호출 시 보낸 ID 와 일치하지 않으면 reject
@@ -215,7 +237,9 @@ export const SummaryReviewScreen: React.FC = () => {
   }, [pendingReqId]);
 
   useEffect(() => {
-    if (!processing) {
+    // 사장님 정책 (2026-05-22 UX): processing (sync 호출 중) + placeholder polling
+    // (background) 둘 다 동안 elapsed 카운트. 5초+ 면 "거의 다 됐어요" 전환.
+    if (!processing && !isPlaceholderLog) {
       setProcessingElapsedMs(0);
       return;
     }
@@ -224,7 +248,73 @@ export const SummaryReviewScreen: React.FC = () => {
       setProcessingElapsedMs(Date.now() - startedAt);
     }, 500);
     return () => clearInterval(id);
-  }, [processing]);
+  }, [processing, isPlaceholderLog]);
+
+  // 사장님 정책 (2026-05-22 §7 placeholder INSERT): server 가 sync 응답에 즉시
+  // placeholder customer_log 반환 (summary='AI 분석 중'). callback 후 UPDATE 진행.
+  // client 가 placeholder 받으면 polling 으로 fresh summary 받기.
+  useEffect(() => {
+    if (!customerLog) return;
+    // 사장님 정책 (2026-05-22 §7 + 웹팀 답신 §4): server 가 placeholder 마킹에
+    // ai_model='pending' / customer_name='처리중...' / summary='AI 분석 중' 사용.
+    // 하나라도 일치하면 polling. callback 후 fresh data 받으면 종료.
+    const isPlaceholder =
+      customerLog.ai_model === 'pending' ||
+      customerLog.customer_name === '처리중...' ||
+      customerLog.summary === 'AI 분석 중' ||
+      (customerLog.summary?.trim() ?? '') === '';
+    if (!isPlaceholder) return;
+    let cancelled = false;
+    let tries = 0;
+    const MAX_TRIES = 30;  // 30 * 3s = 90s budget
+    const tick = async () => {
+      if (cancelled) return;
+      tries += 1;
+      try {
+        const res = await getCustomerLog(customerLog.id);
+        if (cancelled) return;
+        const fresh = res.customer_log;
+        // 사장님 정책 (2026-05-22 웹팀 인계 [4]): callback 순서 N→N-1 역전 또는
+        // server cache/cluster lag 로 polling 응답이 stale row 일 가능성 방어.
+        // fresh.updated_at < 현재 updated_at 이면 무시하고 다음 tick 으로.
+        if (
+          fresh.updated_at &&
+          customerLog.updated_at &&
+          fresh.updated_at < customerLog.updated_at
+        ) {
+          if (__DEV__) {
+            console.log(
+              '[SummaryReview] poll stale (updated_at 역전) — skip',
+              { fresh: fresh.updated_at, current: customerLog.updated_at },
+            );
+          }
+        } else {
+          const stillPlaceholder =
+            fresh.ai_model === 'pending' ||
+            fresh.customer_name === '처리중...' ||
+            fresh.summary === 'AI 분석 중' ||
+            (fresh.summary?.trim() ?? '') === '';
+          if (!stillPlaceholder) {
+            setCustomerLog(fresh);
+            if (!userEditedRef.current) {
+              setValues(rowToFormValues(fresh));
+            }
+            return;
+          }
+        }
+      } catch (e) {
+        logError('SummaryReview.poll', e, { id: customerLog.id, tries });
+      }
+      if (tries < MAX_TRIES) {
+        setTimeout(() => void tick(), 3000);
+      }
+    };
+    const handle = setTimeout(() => void tick(), 3000);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [customerLog]);
 
   // 사장님 정책 (2026-05-21 비상 fix R2): customerLog state 가 stale (다른 통화)
   // 인 경우 render 단에서 차단. useState 가 navigation reuse 에 의해 reset 안 되는
@@ -238,6 +328,21 @@ export const SummaryReviewScreen: React.FC = () => {
     }
     return customerLog;
   }, [customerLog, pendingReqId]);
+
+  const isPlaceholderLog = useMemo(() => {
+    if (!customerLog) return false;
+    return (
+      customerLog.ai_model === 'pending' ||
+      customerLog.customer_name === '처리중...' ||
+      customerLog.summary === 'AI 분석 중' ||
+      (customerLog.summary?.trim() ?? '') === ''
+    );
+  }, [customerLog]);
+  // 사장님 정책 (v35): "처리중" / "AI 분석 중" placeholder 텍스트 사장님 눈에
+  // 노출 X. placeholder polling 동안에도 LoadingSecretary 유지 → fresh data
+  // 받으면 form 표시. CallPostActivity 의 native loading 삭제 + RN LoadingSecretary
+  // 단일 loading UI 정책과 짝.
+  const showLoading = processing || isPlaceholderLog;
 
   const dirty = useMemo(() => {
     return Object.keys(diff(original, values)).length > 0;
@@ -308,22 +413,105 @@ export const SummaryReviewScreen: React.FC = () => {
     return () => sub.remove();
   }, [navigation]);
 
+  // 사장님 정책 (2026-05-22 UX): "분석 중" / "처리 중" 같은 시스템 상태 표현
+  // 노출 금지. 부드러운 비서 어조로.
   const processingHeadline =
-    processingElapsedMs > 5000 ? '거의 다 됐어요' : 'AI가 통화 내용 분석 중';
+    processingElapsedMs > 5000 ? '거의 다 됐어요' : '잠시만 기다려주세요';
   const processingHint =
-    processingElapsedMs > 5000 ? '마무리 중이에요…' : '약 7초 정도 걸려요';
+    processingElapsedMs > 5000 ? '마무리 중이에요…' : '내용을 정리하고 있어요';
+
+  // 사장님 정책 (2026-05-22): 닫기 / 양식전송 후 영맨앱도 같이 background.
+  // 사용자 폰 홈으로 자동 — 영맨 사이트 안 보이게.
+  const closeAndBackground = useCallback(() => {
+    navigation.popToTop();
+    if (Platform.OS === 'android') {
+      const bridge = (
+        NativeModules as { AppBridge?: { moveToBackground: () => void } }
+      ).AppBridge;
+      try {
+        bridge?.moveToBackground();
+      } catch {
+        // ignore
+      }
+    }
+  }, [navigation]);
+
+  // 사장님 정책 (2026-05-22 웹팀 commit 671177e): form state "닫기" (좌측 헤더,
+  // showLoading=false 시점) 시 요약 폐기 확인 alert. "네" → cancel + 닫기,
+  // "아니요" → 그냥 닫기.
+  const onClose = useCallback(() => {
+    const targetId = displayLog?.id;
+    if (!targetId) {
+      closeAndBackground();
+      return;
+    }
+    Alert.alert(
+      '요약내용을 폐기하시겠습니까?',
+      '폐기하면 통화 요약과 관련 데이터가 모두 삭제됩니다.',
+      [
+        { text: '아니요', style: 'cancel', onPress: () => closeAndBackground() },
+        {
+          text: '네',
+          style: 'destructive',
+          onPress: () => {
+            cancelCustomerLog(targetId).catch(e => {
+              logError('SummaryReview.cancel', e, { id: targetId });
+            });
+            closeAndBackground();
+          },
+        },
+      ],
+    );
+  }, [displayLog, closeAndBackground]);
+
+  // 사장님 정책 (2026-05-22 PM): loading state 의 캐릭터 우측 상단 X 버튼.
+  // 확인 alert 없이 즉시 요약 작업 중지 (cancel endpoint 호출) + 모달 닫기.
+  // customerLog (placeholder 든 fresh 든) 있으면 cancel — placeholder 면 server
+  // 측 cascade 삭제로 잔해 정리. displayLog 가 아닌 customerLog 사용 (loading
+  // 중엔 displayLog 가 placeholder reqId 일치 통과 후 row 라 같음).
+  const onLoadingClose = useCallback(() => {
+    const targetId = customerLog?.id;
+    if (targetId) {
+      cancelCustomerLog(targetId).catch(e => {
+        logError('SummaryReview.loadingCancel', e, { id: targetId });
+      });
+    }
+    closeAndBackground();
+  }, [customerLog, closeAndBackground]);
+
+  // 사장님 정책 (2026-05-22 PM 2차): loading state = 전체 화면 dim + 가운데 카드.
+  // form state = 일반 흰 배경. 두 흐름 wrapper 완전 분리해 stack 아래 layer 가
+  // 비치는 현상 차단.
+  if (showLoading) {
+    return (
+      <SafeAreaView style={styles.loadingBackdrop} edges={['top', 'bottom']}>
+        <Pressable
+          onPress={onLoadingClose}
+          hitSlop={14}
+          style={styles.loadingCloseTopRight}
+          accessibilityLabel="요약 작업 중지"
+        >
+          <Text style={styles.loadingCloseTopRightText}>×</Text>
+        </Pressable>
+        <View style={styles.loadingCenterBlock}>
+          <Text style={styles.aiSummaryTitle}>AI 요약중...</Text>
+          <LoadingSecretary size={165} />
+          <Text style={styles.processingHeadline}>{processingHeadline}</Text>
+          <Text style={styles.processingHint}>{processingHint}</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.headerRow}>
-        <Pressable onPress={() => navigation.popToTop()} hitSlop={12}>
+        <Pressable onPress={onClose} hitSlop={12}>
           <Text style={styles.close}>닫기</Text>
         </Pressable>
-        {!processing && (
-          <Pressable onPress={onSave} disabled={saving} hitSlop={12}>
-            <Text style={styles.save}>양식 전송</Text>
-          </Pressable>
-        )}
+        <Pressable onPress={onSave} disabled={saving} hitSlop={12}>
+          <Text style={styles.save}>양식 전송</Text>
+        </Pressable>
       </View>
 
       <KeyboardAvoidingView
@@ -338,71 +526,58 @@ export const SummaryReviewScreen: React.FC = () => {
       >
         <Text style={styles.title}>AI 요약 결과</Text>
         <Text style={styles.subtitle}>
-          {processing
-            ? 'AI가 통화를 분석하고 있어요. 잠시만 기다려주세요.'
-            : 'AI가 정리한 내용이에요. 필요하면 수정해주세요.'}
+          AI가 정리한 내용이에요. 필요하면 수정해주세요.
         </Text>
-
-        {processing ? (
-          <View style={styles.processingBody}>
-            <ActivityIndicator size="large" color="#0066FF" />
-            <Text style={styles.processingHeadline}>{processingHeadline}</Text>
-            <Text style={styles.processingHint}>{processingHint}</Text>
+        {displayLog && (
+          <View style={styles.metaCard}>
+            <Text style={styles.metaText}>
+              상담일시{' '}
+              {new Date(displayLog.consult_at).toLocaleString('ko-KR')}
+            </Text>
           </View>
-        ) : (
-          <>
-            {displayLog && (
-              <View style={styles.metaCard}>
-                <Text style={styles.metaText}>
-                  상담일시{' '}
-                  {new Date(displayLog.consult_at).toLocaleString('ko-KR')}
-                </Text>
-              </View>
-            )}
-            {!displayLog && customerLog && (
-              <View style={styles.metaCard}>
-                <Text style={styles.metaText}>
-                  이전 통화 정보입니다. 요약 처리가 완료되면 새로 표시됩니다.
-                </Text>
-              </View>
-            )}
+        )}
+        {!displayLog && customerLog && (
+          <View style={styles.metaCard}>
+            <Text style={styles.metaText}>
+              이전 통화 정보입니다. 요약 처리가 완료되면 새로 표시됩니다.
+            </Text>
+          </View>
+        )}
 
-            <Text style={styles.groupPickerLabel}>양식을 전송할 그룹</Text>
-            <Pressable
-              style={styles.groupChip}
-              onPress={() => setGroupPickerOpen(true)}
-            >
-              <Text style={styles.groupChipValue} numberOfLines={1}>
-                {selectedGroupTitle}
-              </Text>
-              <Text style={styles.groupChipChevron}>▾</Text>
-            </Pressable>
+        <Text style={styles.groupPickerLabel}>양식을 전송할 그룹</Text>
+        <Pressable
+          style={styles.groupChip}
+          onPress={() => setGroupPickerOpen(true)}
+        >
+          <Text style={styles.groupChipValue} numberOfLines={1}>
+            {selectedGroupTitle}
+          </Text>
+          <Text style={styles.groupChipChevron}>▾</Text>
+        </Pressable>
 
-            {FIELDS.map(f => (
-              <View key={f.key} style={styles.fieldBlock}>
-                <Text style={styles.fieldLabel}>{f.label}</Text>
-                <TextInput
-                  style={[
-                    styles.input,
-                    f.multiline ? styles.inputMulti : undefined,
-                  ]}
-                  value={values[f.key]}
-                  onChangeText={t => updateField(f.key, t)}
-                  placeholder={f.placeholder ?? ''}
-                  placeholderTextColor="#999"
-                  multiline={f.multiline}
-                  textAlignVertical={f.multiline ? 'top' : 'center'}
-                />
-              </View>
-            ))}
+        {FIELDS.map(f => (
+          <View key={f.key} style={styles.fieldBlock}>
+            <Text style={styles.fieldLabel}>{f.label}</Text>
+            <TextInput
+              style={[
+                styles.input,
+                f.multiline ? styles.inputMulti : undefined,
+              ]}
+              value={values[f.key]}
+              onChangeText={t => updateField(f.key, t)}
+              placeholder={f.placeholder ?? ''}
+              placeholderTextColor="#999"
+              multiline={f.multiline}
+              textAlignVertical={f.multiline ? 'top' : 'center'}
+            />
+          </View>
+        ))}
 
-            {saving && (
-              <View style={styles.savingOverlay}>
-                <ActivityIndicator />
-                <Text style={styles.savingText}>저장 중…</Text>
-              </View>
-            )}
-          </>
+        {saving && (
+          <View style={styles.savingOverlay}>
+            <ActivityIndicator />
+            <Text style={styles.savingText}>저장 중…</Text>
+          </View>
         )}
       </ScrollView>
       </KeyboardAvoidingView>
@@ -468,6 +643,50 @@ export const SummaryReviewScreen: React.FC = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
+  // 사장님 정책 (v36 2026-05-23): 흰 배경 풀스크린. 카드 디자인 제거 (사장님 명시).
+  // LoadingSecretary + 텍스트가 화면 중앙. X 버튼 우상단.
+  loadingBackdrop: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  loadingCenterBlock: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    paddingHorizontal: 28,
+  },
+  loadingCloseTopRight: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0,0,0,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  loadingCloseTopRightText: {
+    color: '#444444',
+    fontSize: 18,
+    lineHeight: 18,
+    fontWeight: '400',
+    marginTop: -1,
+    includeFontPadding: false,
+  },
+  // 사장님 정책 (2026-05-22 PM 폰트 다듬기): "AI 요약중..." 메인 타이틀.
+  // fontWeight 700 → 600, letterSpacing -0.6 (한글에 부드러운 압축), 색상
+  // 살짝 부드러운 톤.
+  aiSummaryTitle: {
+    fontSize: 21,
+    fontWeight: '600',
+    color: '#1F1F23',
+    letterSpacing: -0.6,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
   flex: { flex: 1 },
   headerRow: {
     flexDirection: 'row',
@@ -490,21 +709,32 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   metaText: { color: '#666666', fontSize: 13, marginVertical: 1 },
+  // 사장님 정책 (2026-05-22 PM): 캐릭터 + 텍스트를 화면 중앙. ScrollView 의
+  // contentContainerStyle 이 flexGrow:1 + justifyContent:center 면 화면 중앙
+  // 정렬 가능. processingBody 자체는 alignItems center 만.
   processingBody: {
-    marginTop: 48,
     alignItems: 'center',
     gap: 16,
   },
+  // showLoading 일 때 ScrollView body 가 화면 전체 차지 + 자식 중앙 정렬.
+  bodyLoading: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+  },
+  // 사장님 정책 (2026-05-22 PM 폰트 다듬기): 부드러운 semibold + 압축 자간.
   processingHeadline: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#111111',
-    letterSpacing: -0.2,
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1F1F23',
+    letterSpacing: -0.5,
+    marginTop: 4,
   },
   processingHint: {
-    fontSize: 14,
-    color: '#666666',
-    marginTop: -8,
+    fontSize: 13,
+    color: '#7A7A80',
+    letterSpacing: -0.3,
+    marginTop: -6,
   },
   fieldBlock: { marginTop: 16 },
   fieldLabel: { fontSize: 13, color: '#666666', marginBottom: 6 },

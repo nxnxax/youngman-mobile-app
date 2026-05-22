@@ -95,6 +95,33 @@
           android:turnScreenOn="true"
           android:exported="false" />
 
+      <!-- 사장님 정책 (2026-05-21 architecture 재설계 §3): 통화 후 모달 진입점.
+           background startService 차단 환경에서 안정적으로 OverlayService 를
+           foreground state 에서 시작하기 위한 transparent activity. 잠금화면
+           위에도 표시 가능. -->
+      <!-- 사장님 정책 (2026-05-22 v19): Android 15 BAL_BLOCK 도미노 fix.
+           logcat 확인: PostCallScanService(FGS) 의 startActivity 가
+           callerStartMode=MODE_BACKGROUND_ACTIVITY_START_SYSTEM_DEFINED 로
+           BAL_BLOCK. 그러나 system (uid=1000) 이 통화 종료 시 자동으로
+           android.telecom.action.POST_CALL 을 영맨에게 보내려고 시도하는데
+           exported=false 라 result code=-91 로 차단되고 있음.
+           POST_CALL action filter + exported=true 면 system 이 직접 launch
+           → BAL 무관 (system caller). 매번 안정적. -->
+      <activity
+          android:name=".overlay.CallPostActivity"
+          android:theme="@android:style/Theme.Translucent.NoTitleBar"
+          android:excludeFromRecents="true"
+          android:showOnLockScreen="true"
+          android:turnScreenOn="true"
+          android:taskAffinity=""
+          android:launchMode="singleTop"
+          android:exported="true">
+        <intent-filter>
+            <action android:name="android.telecom.action.POST_CALL" />
+            <category android:name="android.intent.category.DEFAULT" />
+        </intent-filter>
+      </activity>
+
       <receiver
           android:name=".telephony.CallStateReceiver"
           android:exported="true">
@@ -122,6 +149,7 @@
 
       <service
           android:name=".overlay.OverlayService"
+          android:foregroundServiceType="dataSync"
           android:exported="false" />
 
       <service
@@ -130,10 +158,6 @@
 
       <service
           android:name=".overlay.ProgressOverlayService"
-          android:exported="false" />
-
-      <service
-          android:name=".overlay.IncomingCallOverlayService"
           android:exported="false" />
 
       <service

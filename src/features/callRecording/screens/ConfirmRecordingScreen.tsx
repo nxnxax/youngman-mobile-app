@@ -5,7 +5,6 @@ import type {
 } from '@react-navigation/native-stack';
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   Pressable,
   StyleSheet,
@@ -32,6 +31,7 @@ import { fetchLedgerGroups } from '../api/records';
 import type { LedgerGroup } from '../api/types';
 import { uploadRecording } from '../api/uploadRecording';
 import { extractPhoneNumber } from '../scanner/heuristics';
+import { LoadingSecretary } from '../components/LoadingSecretary';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'ConfirmRecording'>;
 type Route = RouteProp<RootStackParamList, 'ConfirmRecording'>;
@@ -164,66 +164,80 @@ export const ConfirmRecordingScreen: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Animate the trailing "..." on the loading label so the text itself looks
-  // alive (".  " → ".. " → "...").
-  const [dots, setDots] = useState('...');
-  useEffect(() => {
-    let count = 3;
-    const id = setInterval(() => {
-      count = (count % 3) + 1;
-      setDots('.'.repeat(count));
-    }, 400);
-    return () => clearInterval(id);
-  }, []);
-
-  const loadingHeadline = '오디오 업로드 중';
-  const loadingHint = '잠시만요…';
-
+  // 사장님 정책 (v36 2026-05-23): SummaryReview 의 loading 화면과 동일 visual.
+  // "오디오 업로드 중" / ActivityIndicator 같은 시스템 표현 노출 X — LoadingSecretary
+  // + "AI 요약중..." / "잠시만 기다려주세요" / "내용을 정리하고 있어요" 로 통일.
+  // 사용자는 click → 흰 풀스크린 + 캐릭터 가 ConfirmRecording 부터 SummaryReview
+  // 까지 끊김 없이 표시됨 (transition animation=none).
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-      <View style={styles.headerRow}>
-        <Pressable
-          onPress={() => navigation.goBack()}
-          hitSlop={12}
-        >
-          <Text style={styles.close}>나중에</Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.loadingBody}>
-        <ActivityIndicator size="large" color="#0066FF" />
-        <Text style={styles.loadingText}>{loadingHeadline}{dots}</Text>
-        <Text style={styles.loadingHint}>{loadingHint}</Text>
+      <Pressable
+        onPress={() => navigation.goBack()}
+        hitSlop={14}
+        style={styles.loadingCloseTopRight}
+        accessibilityLabel="요약 작업 중지"
+      >
+        <Text style={styles.loadingCloseTopRightText}>×</Text>
+      </Pressable>
+      <View style={styles.loadingCenterBlock}>
+        <Text style={styles.aiSummaryTitle}>AI 요약중...</Text>
+        <LoadingSecretary size={165} />
+        <Text style={styles.processingHeadline}>잠시만 기다려주세요</Text>
+        <Text style={styles.processingHint}>내용을 정리하고 있어요</Text>
       </View>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
+  // SummaryReview 의 loadingBackdrop / loadingCenterBlock / 등과 동일 디자인.
   container: { flex: 1, backgroundColor: '#FFFFFF' },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-  },
-  close: { color: '#666', fontSize: 15 },
-  loadingBody: {
-    flex: 1,
-    justifyContent: 'center',
+  loadingCloseTopRight: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0,0,0,0.08)',
     alignItems: 'center',
-    paddingBottom: 80,
-    gap: 20,
+    justifyContent: 'center',
+    zIndex: 10,
   },
-  loadingText: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#111111',
-    letterSpacing: -0.2,
+  loadingCloseTopRightText: {
+    color: '#444444',
+    fontSize: 18,
+    lineHeight: 18,
+    fontWeight: '400',
+    marginTop: -1,
+    includeFontPadding: false,
   },
-  loadingHint: {
-    fontSize: 14,
-    color: '#666666',
+  loadingCenterBlock: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    paddingHorizontal: 28,
+  },
+  aiSummaryTitle: {
+    fontSize: 21,
+    fontWeight: '600',
+    color: '#1F1F23',
+    letterSpacing: -0.6,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  processingHeadline: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1F1F23',
+    letterSpacing: -0.5,
     marginTop: 4,
+  },
+  processingHint: {
+    fontSize: 13,
+    color: '#7A7A80',
+    letterSpacing: -0.3,
+    marginTop: -6,
   },
 });

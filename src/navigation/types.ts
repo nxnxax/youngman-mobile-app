@@ -37,4 +37,5 @@ export type RootStackParamList = {
   UnreviewedSummaries: undefined;
   UnreviewedPreview: { jobId: string };
   ManufacturerGuide: undefined;
+  Tester: undefined;
 };

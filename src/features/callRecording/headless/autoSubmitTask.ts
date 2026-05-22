@@ -21,13 +21,9 @@ import { uploadRecording } from '../api/uploadRecording';
 import { extractPhoneNumber } from '../scanner/heuristics';
 
 /** Flag set by this headless task when an auto-submit run fails with a
- *  *hard* auth failure (refresh_token invalid 등). WebViewHost picks this
- *  up on mount/foreground and pops the SESSION_DEAD prompt.
- *
- *  Policy 1 (2026-05-20 사장님): "HTTP 401 사용자 노출 금지". 따라서 일반
- *  401 / auth_pending 케이스는 이 flag 를 세우지 않는다 — 그건 outbox 의
- *  pending_auth 보존 + outboxProcessor 자동 재시도가 잡고, 사용자에겐
- *  PENDING flag (아래) 만 보여서 "세션 준비 중" 안내. */
+ *  *hard* auth failure (refresh_token invalid 등). WebViewHost clears it on
+ *  foreground — no user-visible alert is shown (출시 정책 2026-05-21). The
+ *  WebView itself surfaces the login screen if the session is truly gone. */
 export const AUTO_SUBMIT_AUTH_FAIL_FLAG = '@youngman/autoSubmit_authFail_v1';
 
 /** auth_pending (또는 일반 401) 케이스 — outbox 에 pending_auth 보존됐고
@@ -210,11 +206,24 @@ export async function autoSubmitTask(
   // picker default 와 동일 정책 (is_main 우선). fetch 실패 시 null 로 fall
   // back — 옛 동작 유지 (웹팀 fallback 의존).
   let resolvedGroupId: string | null = data.groupId ?? null;
+  // 사장님 정책 (2026-05-22 PM 진단): group_id backend 미도달 case 추적.
+  // data.groupId (native EXTRA_GROUP_ID 전달값) 의 raw value + type 노출.
+  logError(
+    'AutoSubmit.groupTrace',
+    new Error(
+      `data.groupId=${JSON.stringify(data.groupId)} type=${typeof data.groupId} ` +
+        `resolvedGroupId(before fallback)=${JSON.stringify(resolvedGroupId)}`,
+    ),
+  );
   if (!resolvedGroupId) {
     try {
       const res = await fetchLedgerGroups('customer');
       const main = res.groups.find(g => g.is_main) ?? res.groups[0];
       resolvedGroupId = main?.id ?? null;
+      logError(
+        'AutoSubmit.groupTrace',
+        new Error(`fetchLedgerGroups fallback → resolvedGroupId=${JSON.stringify(resolvedGroupId)}`),
+      );
     } catch (e) {
       if (__DEV__) {
         console.log(
@@ -345,6 +354,13 @@ export async function autoSubmitTask(
     // 실패 시 customer_log 는 이미 INSERT 됐고 ledger mirror 만 빠짐 →
     // outboxProcessor 다음 사이클 retry 또는 사장님이 수동으로 그룹 보내기.
     try {
+      logError(
+        'AutoSubmit.groupTrace',
+        new Error(
+          `sendCustomerLogToGroup call: customerLogId=${result.customer_log.id} ` +
+            `group_id=${JSON.stringify(resolvedGroupId)}`,
+        ),
+      );
       await sendCustomerLogToGroup({
         id: result.customer_log.id,
         group_id: resolvedGroupId,
@@ -423,9 +439,9 @@ export async function autoSubmitTask(
     });
 
     if (isAuthPending) {
-      // 세션 준비 중 (영맨 로그인 미완료 / refreshToken 누락). 사용자에게
-      // SESSION_DEAD 모달 띄우지 말고 친절한 "세션 준비 중" toast 만 안내.
-      // outboxProcessor 가 로그인/refresh 완료 후 자동 재시도.
+      // 세션 준비 중 (영맨 로그인 미완료 / refreshToken 누락). 친절한 "세션
+      // 준비 중" toast 만 안내. outboxProcessor 가 로그인/refresh 완료 후
+      // 자동 재시도.
       try {
         await AsyncStorage.setItem(
           AUTO_SUBMIT_PENDING_FLAG,
@@ -435,7 +451,8 @@ export async function autoSubmitTask(
         // best-effort
       }
     } else if (isHardAuthFail) {
-      // refresh_token 자체 무효 등 진짜 재로그인 필요 케이스만 SESSION_DEAD.
+      // refresh_token 자체 무효 등 진짜 재로그인 필요 케이스. WebView 의
+      // 로그인 화면이 자동 노출되므로 별도 알림 없음.
       try {
         await AsyncStorage.setItem(
           AUTO_SUBMIT_AUTH_FAIL_FLAG,

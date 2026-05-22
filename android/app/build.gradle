@@ -83,7 +83,7 @@ android {
         applicationId "com.youngmanapp"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
+        versionCode 37
         versionName "1.0"
     }
     signingConfigs {
@@ -93,15 +93,21 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        release {
+            if (project.hasProperty('YOUNGMAN_UPLOAD_STORE_FILE')) {
+                storeFile file(YOUNGMAN_UPLOAD_STORE_FILE)
+                storePassword YOUNGMAN_UPLOAD_STORE_PASSWORD
+                keyAlias YOUNGMAN_UPLOAD_KEY_ALIAS
+                keyPassword YOUNGMAN_UPLOAD_KEY_PASSWORD
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            signingConfig project.hasProperty('YOUNGMAN_UPLOAD_STORE_FILE') ? signingConfigs.release : signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
@@ -113,6 +119,10 @@ dependencies {
     implementation("com.facebook.react:react-android")
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("androidx.cardview:cardview:1.0.0")
+    // 사장님 정책 (2026-05-22 PM v31): CallPostActivity 가 native 측에서 직접
+    // upload + process-recording 호출 → 영맨 RN 진입 없이 사용자 화면 위에서
+    // loading_card 유지. OkHttp 추가 (RN 자체도 사용 — version 충돌 가능성 낮음).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

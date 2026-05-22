@@ -27,6 +27,7 @@ import com.youngmanapp.R
 import com.youngmanapp.callrecording.CallRecordingClassifier
 import com.youngmanapp.callrecording.RecordingState
 import com.youngmanapp.logging.ErrorLog
+import com.youngmanapp.overlay.CallPostActivity
 import com.youngmanapp.overlay.LockScreenLauncherActivity
 import com.youngmanapp.overlay.OverlayService
 import android.app.KeyguardManager
@@ -117,6 +118,14 @@ class PostCallScanService : Service() {
     startedAt = System.currentTimeMillis()
     Log.d(TAG, "onStartCommand")
     startForeground(NOTIF_ID_ONGOING, buildOngoingNotification())
+
+    // 사장님 정책 (2026-05-22 PM 깜빡임 fix): ACTION_PLACEHOLDER 의 CallPostActivity.startPlaceholder
+    // 호출 제거. v19 manifest 의 POST_CALL action filter (system uid=1000 자동
+    // launch) 가 placeholder 모달의 단일 주체. PostCallScanService 가 또 발행
+    // 하면 모달 + 알림이 중복으로 깜빡임 (사장님 v22 PoC). 본 service 는 file
+    // 매칭 후 startWithData (onNewIntent 로 data update) 만 담당. 또 file 매칭
+    // 전 placeholder 표시는 system POST_CALL 이 즉시 처리.
+
     registerMediaObserver()
     registerFileObservers()  // 새 구조: file create/close 이벤트 즉시 감지
     workerHandler.post(pollRunnable)
@@ -167,10 +176,50 @@ class PostCallScanService : Service() {
     if (path == null) return
     if (!AUDIO_EXT_REGEX.matches(path)) return
     Log.d(TAG, "FileObserver CLOSE_WRITE: $path @ ${dir.absolutePath}")
-    // ContentObserver kick 과 동일 흐름 — pollRunnable 호출. fs fallback 가
-    // 이 파일을 매칭 후 OverlayService.start.
+    // 사장님 정책 (2026-05-22 §3 즉시 매칭): worker 가 fs fallback 등으로 busy
+    // 상태일 수 있어 post(pollRunnable) 가 5초+ 큐 대기 발생. CLOSE_WRITE 받자
+    // 마자 onEvent thread 에서 이 파일 자체로 즉시 매칭 + Activity 시작.
+    // AtomicBoolean 으로 race 방지.
+    if (!directMatchInFlight.compareAndSet(false, true)) return
+    Thread {
+      try {
+        directMatchFromCloseWrite(dir, path)
+      } finally {
+        directMatchInFlight.set(false)
+      }
+    }.start()
     workerHandler.removeCallbacks(pollRunnable)
     workerHandler.post(pollRunnable)
+  }
+
+  private val directMatchInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+  private fun directMatchFromCloseWrite(dir: File, path: String) {
+    val file = File(dir, path)
+    if (!file.isFile) return
+    if (!CallRecordingClassifier.looksLikeCallRecording("${dir.name}/", file.name)) return
+    val lastProcessed = RecordingState.getLastProcessedPath(this)
+    if (lastProcessed != null && file.absolutePath == lastProcessed) return
+    val duration = probeDurationMs(file)
+    val tsSec = file.lastModified() / 1000
+    val externalRoot = try { Environment.getExternalStorageDirectory() } catch (_: Throwable) { null }
+    val rel = if (externalRoot != null) {
+      val parent = file.parentFile?.absolutePath ?: ""
+      val root = externalRoot.absolutePath
+      if (parent.startsWith(root)) parent.substring(root.length).trimStart('/') + "/" else "${dir.name}/"
+    } else "${dir.name}/"
+    RecordingState.setLastProcessedPath(this, file.absolutePath)
+    RecordingState.setBaseline(this, tsSec)
+    val found = FoundFile(
+      uri = Uri.fromFile(file).toString(),
+      displayName = file.name,
+      relativePath = rel,
+      dateAdded = tsSec,
+      duration = duration,
+    )
+    Log.d(TAG, "direct match (CLOSE_WRITE): ${file.name} duration=$duration")
+    CallPostActivity.startWithData(this, found)
+    mainHandler.post { stopSelfSafely() }
   }
 
   private fun unregisterFileObservers() {
@@ -225,17 +274,9 @@ class PostCallScanService : Service() {
               // startActivity 는 어디서든 OK (OS 가 main 에서 onStartCommand
               // 처리). KeyguardManager.isKeyguardLocked 도 system service 라
               // worker 에서 안전. main thread post latency 제거 = 모달 즉시.
-              if (canDrawOverlay()) {
-                val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-                val isLocked = km?.isKeyguardLocked == true
-                if (isLocked) {
-                  LockScreenLauncherActivity.start(this@PostCallScanService, found)
-                } else {
-                  OverlayService.start(this@PostCallScanService, found)
-                }
-              } else {
-                notifier.showRecordingFound(found)
-              }
+              // 사장님 정책 (2026-05-22 §3 fullscreen Activity 모달): Activity 자체는
+              // SYSTEM_ALERT_WINDOW 권한 무관. 항상 CallPostActivity 시작.
+              CallPostActivity.startWithData(this@PostCallScanService, found)
               // service 라이프사이클만 main 으로 escalate.
               mainHandler.post { stopSelfSafely() }
               return
@@ -481,12 +522,35 @@ class PostCallScanService : Service() {
      *  다음 진짜 통화 종료 시 onStartCommand → polling 시작 latency 0. */
     const val ACTION_WARMUP = "com.youngmanapp.action.POST_CALL_SCAN_WARMUP"
 
+    /** 사장님 정책 (2026-05-22 §2 alive FGS): broadcast receiver 의 startActivity
+     *  차단을 우회하기 위해, 이 service 가 FGS 상태에서 placeholder Activity 시작. */
+    const val ACTION_PLACEHOLDER = "com.youngmanapp.action.POST_CALL_SCAN_PLACEHOLDER"
+    const val EXTRA_CALL_ID = "callId"
+
     fun start(ctx: Context) {
       val intent = Intent(ctx, PostCallScanService::class.java)
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         ctx.startForegroundService(intent)
       } else {
         ctx.startService(intent)
+      }
+    }
+
+    /** CallStateReceiver 가 OFFHOOK → IDLE 감지 시 호출. 이 service 가 FGS 로
+     *  시작 + placeholder Activity 즉시 띄움. file 매칭은 그 후 진행. */
+    fun startWithPlaceholder(ctx: Context, callId: String) {
+      val intent =
+          Intent(ctx, PostCallScanService::class.java)
+              .setAction(ACTION_PLACEHOLDER)
+              .putExtra(EXTRA_CALL_ID, callId)
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+          ctx.startForegroundService(intent)
+        } else {
+          ctx.startService(intent)
+        }
+      } catch (e: Throwable) {
+        Log.w(TAG, "startWithPlaceholder failed", e)
       }
     }
 

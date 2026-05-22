@@ -1,5 +1,7 @@
 package com.youngmanapp.overlay
 
+import android.app.Notification
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -18,6 +20,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.app.NotificationCompat
 import java.util.concurrent.atomic.AtomicReference
 import com.youngmanapp.R
 import com.youngmanapp.callrecording.RecordingState
@@ -77,6 +80,10 @@ class OverlayService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    // 사장님 정책 (2026-05-21 architecture 재설계): FGS 화. background launch
+    // 제한 환경에서도 ContextCompat.startForegroundService 로 시작 가능. silent
+    // notification + FOREGROUND_SERVICE_DEFERRED 으로 사용자 노출 최소화.
+    startForeground(NOTIF_ID_OVERLAY, buildSilentNotification())
     Log.d(TAG, "onStartCommand intent=${intent != null}")
     if (intent == null) {
       stopSelf()
@@ -468,7 +475,36 @@ class OverlayService : Service() {
     // remaining race window 차단.
     handler.removeCallbacksAndMessages(null)
     dismissView()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+      stopForeground(Service.STOP_FOREGROUND_REMOVE)
+    } else {
+      @Suppress("DEPRECATION") stopForeground(true)
+    }
     stopSelf()
+  }
+
+  private fun buildSilentNotification(): Notification {
+    PostCallScanService.ensureChannel(
+      this,
+      CHANNEL_ID_OVERLAY,
+      " ",
+      NotificationManager.IMPORTANCE_MIN,
+    )
+    val builder = NotificationCompat.Builder(this, CHANNEL_ID_OVERLAY)
+      .setSmallIcon(R.mipmap.ic_launcher)
+      .setContentTitle(" ")
+      .setContentText(" ")
+      .setOngoing(true)
+      .setSilent(true)
+      .setPriority(NotificationCompat.PRIORITY_MIN)
+      .setCategory(NotificationCompat.CATEGORY_SERVICE)
+      .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      builder.setForegroundServiceBehavior(
+        NotificationCompat.FOREGROUND_SERVICE_DEFERRED,
+      )
+    }
+    return builder.build()
   }
 
   private fun dismissView() {
@@ -514,6 +550,8 @@ class OverlayService : Service() {
 
   companion object {
     private const val TAG = "OverlayService"
+    private const val NOTIF_ID_OVERLAY = 4002
+    private const val CHANNEL_ID_OVERLAY = "yk_overlay_v1"
     const val EXTRA_URI = "uri"
     const val EXTRA_NAME = "name"
     const val EXTRA_DURATION = "duration"
@@ -538,10 +576,10 @@ class OverlayService : Service() {
             putExtra(EXTRA_MIME, "audio/mp4")
           }
       try {
-        ctx.startService(intent)
+        androidx.core.content.ContextCompat.startForegroundService(ctx, intent)
       } catch (e: Exception) {
-        Log.w(TAG, "startService failed", e)
-        ErrorLog.append(ctx, TAG, "startService failed", e)
+        Log.w(TAG, "startForegroundService failed", e)
+        ErrorLog.append(ctx, TAG, "startForegroundService failed", e)
       }
     }
   }

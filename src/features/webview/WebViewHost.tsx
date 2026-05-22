@@ -1,7 +1,7 @@
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, DeviceEventEmitter, Platform, StyleSheet, ToastAndroid, View } from 'react-native';
+import { AppState, DeviceEventEmitter, Platform, StyleSheet, ToastAndroid, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import type {
@@ -16,11 +16,12 @@ import type { RootStackParamList } from '../../navigation/types';
 import { CUSTOMERS_PATH, USER_AGENT_SUFFIX, WEB_BASE_URL } from '../../config/env';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { SESSION_REFRESH_REQUEST_EVENT } from '../../services/api/client';
 import {
-  SESSION_DEAD_EVENT,
-  SESSION_REFRESH_REQUEST_EVENT,
+  attemptSilentReauth,
   SESSION_SYNC_TO_WEBVIEW_EVENT,
-} from '../../services/api/client';
+} from '../../services/auth/silentReauth';
+import { consumeLongIdle } from '../../services/auth/sessionHealth';
 import {
   AUTO_SUBMIT_AUTH_FAIL_FLAG,
   AUTO_SUBMIT_PENDING_FLAG,
@@ -85,14 +86,12 @@ export const WebViewHost: React.FC = () => {
   // single-shot stale token.
   const lastReloadAtRef = useRef<number>(0);
   // How many times in a row the session-refresh handler tried to recover
-  // without ever receiving a fresh auth.login back. When this crosses a
-  // threshold we give up auto-recovery and surface a "please log in again"
-  // event so the user can break the cycle manually.
+  // without ever receiving a fresh auth.login back. Used to throttle
+  // recovery attempts so we don't spin on a genuinely dead session.
   const refreshFailureStreakRef = useRef<number>(0);
-  // Path A 3번 (웹팀 의뢰, 2026-05-20) — recent-success guard.
-  // 사장님 케이스: 첫 refresh 8.7초 만에 성공 → 그 직후 다른 백그라운드 401
-  // 시퀀스가 timeout → SESSION_DEAD 오발동. auth.login이 최근 60초 내에
-  // 도착했다면 세션은 명백히 살아있으므로 DEAD 신호를 무시한다.
+  // Recent-success guard. auth.login arriving within the last 60s proves
+  // the session is alive — late background 401 timeouts should not trigger
+  // another recovery cycle.
   const lastAuthLoginAtRef = useRef<number>(0);
   const [loading, setLoading] = useState<boolean>(true);
   const [canGoBack, setCanGoBack] = useState<boolean>(false);
@@ -131,10 +130,23 @@ export const WebViewHost: React.FC = () => {
   const onNativeRoute = useCallback(
     (route: NativeRoute): boolean => {
       if (route.pathname === 'confirm') {
-        // Clear any stale modal stack first — if the user opened a previous
-        // call's SummaryReview but never sent it, leaving that screen alive
-        // would let it shadow the new call's flow on failure / back press.
         navigation.popToTop();
+        // v31 복원: native CallPostActivity 가 processRecording 호출 + customer_log
+        // 받은 경우 query param 으로 전달. ConfirmRecording skip → SummaryReview 직접.
+        const customerLogJsonRaw = route.params.customer_log_json;
+        if (customerLogJsonRaw) {
+          try {
+            const parsed = JSON.parse(customerLogJsonRaw);
+            const customerLog = parsed.customer_log ?? parsed;
+            navigation.navigate('SummaryReview', {
+              customerLog,
+              groupId: null,
+            });
+            return true;
+          } catch {
+            // JSON 파싱 실패 시 기존 흐름으로 fallback.
+          }
+        }
         navigation.navigate('ConfirmRecording', {
           uri: route.params.uri ?? '',
           name: route.params.name ?? '',
@@ -158,6 +170,13 @@ export const WebViewHost: React.FC = () => {
       }
       if (route.pathname === 'settings') {
         navigation.navigate('Settings');
+        return true;
+      }
+      if (route.pathname === 'tester') {
+        // 사장님 정책 (2026-05-21): Play Store 출시 전 테스트 기간. 결제 권유
+        // 자리에서 이 화면으로 이동. config/env.ts 의 TESTER_MODE 가 false 면
+        // 결제 UI 복원, 이 deep link 는 dead path 가 됨 — 안전.
+        navigation.navigate('Tester');
         return true;
       }
       if (route.pathname === 'unreviewed') {
@@ -248,7 +267,34 @@ export const WebViewHost: React.FC = () => {
         ? Date.now() - lastBackgroundedAtRef.current
         : 0;
       const STALE_AFTER_MS = 30 * 60 * 1000; // 30 min
-      if (backgroundedFor > STALE_AFTER_MS && authRef.current) {
+
+      // 사장님 정책 (2026-05-22 "찰거머리" 슬로건): long-idle (기본 6h+) 후엔
+      // WebView 의 refresh 도 dead 일 가능성 큼 (사장님 7h 비상 사례 = 양쪽
+      // refresh_token 휘발). 그 케이스는 refresh 시도 자체를 건너뛰고 즉시
+      // silent re-auth (native Google idToken → Supabase id_token grant) 로
+      // 분기. 성공하면 SESSION_SYNC_TO_WEBVIEW_EVENT 가 WebView 에 새 session
+      // 을 inject → 무감지 복구.
+      if (consumeLongIdle() && authRef.current) {
+        logError(
+          'Session.healthCheck',
+          new Error(
+            `long-idle (${Math.round(backgroundedFor / 60_000)}min) — silent re-auth`,
+          ),
+        );
+        void (async () => {
+          const result = await attemptSilentReauth();
+          if (!result.ok) {
+            // silent 실패 (Google account 없음 / 명시적 로그아웃 등). WebView
+            // 강제 reload → cafe24 측이 자체 인증 흐름 (필요 시 Google OAuth
+            // 한 탭) 진행.
+            logError(
+              'Session.healthCheck',
+              new Error(`silent re-auth fail (${result.reason}) — WebView reload`),
+            );
+            webViewRef.current?.reload();
+          }
+        })();
+      } else if (backgroundedFor > STALE_AFTER_MS && authRef.current) {
         if (__DEV__) {
           console.log(
             '[Session] health check — backgrounded',
@@ -360,14 +406,12 @@ export const WebViewHost: React.FC = () => {
       // Logged-out short-circuit: if the user explicitly logged out (or
       // never logged in this session), reloading the WebView just bounces
       // them to the login page that's already showing. Skip the reload
-      // entirely and emit the dead-session signal so the UI handler can
-      // decide what to do. This removes the "1 blink on logout" artifact.
+      // entirely. The WebView already shows the login screen — the user
+      // sees what they need without a separate alert.
       if (authRef.current == null) {
         if (__DEV__) {
-          console.log('[Session] logged out — skipping reload, emitting dead');
+          console.log('[Session] logged out — skipping reload');
         }
-        logError('Session', new Error('logged-out 401 — skipping reload'));
-        DeviceEventEmitter.emit(SESSION_DEAD_EVENT);
         return;
       }
       // Reload cooldown — see lastReloadAtRef comment for why this exists.
@@ -383,11 +427,9 @@ export const WebViewHost: React.FC = () => {
         }
         return;
       }
-      // Path A 3번 — recent-success guard. If we received a fresh
-      // auth.login within the last 60s, the session is demonstrably
-      // alive; this timeout is most likely a stale parallel 401 burst
-      // (사장님 케이스: 첫 refresh 8.7초 성공 후 다른 백그라운드 호출의
-      // 뒤늦은 timeout이 SESSION_DEAD를 오발동). Don't escalate.
+      // Recent-success guard. If we received a fresh auth.login within the
+      // last 60s, the session is demonstrably alive; this timeout is most
+      // likely a stale parallel 401 burst. Don't escalate.
       const sinceLastLogin = Date.now() - lastAuthLoginAtRef.current;
       if (lastAuthLoginAtRef.current > 0 && sinceLastLogin < 60_000) {
         if (__DEV__) {
@@ -400,18 +442,9 @@ export const WebViewHost: React.FC = () => {
         return;
       }
       // Track failure streak. After several consecutive attempts that never
-      // produced a fresh auth.login, the session is effectively dead and the
-      // user must log in again — emit a signal that the UI listens for.
+      // produced a fresh auth.login, fall back to a silent WebView reload —
+      // the underlying login page will be presented by the web layer.
       refreshFailureStreakRef.current += 1;
-      if (refreshFailureStreakRef.current >= 2) {
-        if (__DEV__) {
-          console.log(
-            '[Session] refresh failed 3 times — emitting dead-session event',
-          );
-        }
-        DeviceEventEmitter.emit(SESSION_DEAD_EVENT);
-        return;
-      }
       if (__DEV__) {
         console.log('[Session] hard fallback — reloading WebView');
       }
@@ -478,83 +511,16 @@ export const WebViewHost: React.FC = () => {
   // The flag prevents the alert from re-triggering every time another
   // background API call hits 401 in quick succession (which is exactly what
   // happens after a logout — see the infinite-reload incident).
-  const sessionDeadShownRef = useRef<boolean>(false);
-  // Cold-start grace period (사장님 정책 2026-05-21): app 시작 첫 15초는
-  // SESSION_DEAD alert 표시 금지. WebView 가 페이지 fetch + Supabase JS 실행 +
-  // auth.login post 까지 3-5초 걸리는 동안 API 호출이 401 나면 SESSION_DEAD 가
-  // emit 되는데, 이때 alert 띄우면 자동로그인 도중에 사용자가 "세션이 만료
-  // 되었습니다" 알림창을 매번 봐야 함. 15초면 자동로그인 99% case 가 완료됨.
-  // 그 이후에도 SESSION_DEAD 나면 진짜 죽은 세션 → alert 정당.
-  const appStartedAtRef = useRef<number>(Date.now());
-  const COLD_START_GRACE_MS = 15_000;
-  useEffect(() => {
-    const sub = DeviceEventEmitter.addListener(SESSION_DEAD_EVENT, () => {
-      if (sessionDeadShownRef.current) return;
-      const sinceStart = Date.now() - appStartedAtRef.current;
-      if (sinceStart < COLD_START_GRACE_MS) {
-        if (__DEV__) {
-          console.log(
-            '[Session] SESSION_DEAD within cold-start grace (',
-            Math.round(sinceStart / 1000),
-            's) — suppressing alert',
-          );
-        }
-        return;
-      }
-      sessionDeadShownRef.current = true;
-      Alert.alert(
-        '다시 로그인이 필요해요',
-        '세션이 만료되었습니다. 로그인 화면으로 이동할까요?',
-        [
-          {
-            text: '나중에',
-            style: 'cancel',
-            onPress: () => {
-              // Allow the prompt to fire again later, but only after a
-              // grace period — otherwise the next background 401 burst
-              // pops this alert immediately.
-              setTimeout(() => {
-                sessionDeadShownRef.current = false;
-              }, 60_000);
-            },
-          },
-          {
-            text: '로그인',
-            onPress: () => {
-              // Navigate the WebView to the site root. The web team's
-              // page renders the login form when there's no session, so
-              // this gets the user back into a clean state.
-              webViewRef.current?.injectJavaScript(
-                `try { window.location.href = ${JSON.stringify(WEB_BASE_URL)}; } catch (e) {} true;`,
-              );
-              // Don't reset the flag yet — let onAuthLogin reset everything
-              // when the new login completes.
-            },
-          },
-        ],
-      );
-    });
-    return () => sub.remove();
-  }, []);
-
-  // AUTO_SUBMIT_AUTH_FAIL_FLAG = headless 가 hard auth fail (refresh_token
-  // 자체 무효) 만났을 때만 세팅. 그땐 SESSION_DEAD 모달 정당.
-  //
-  // AUTO_SUBMIT_PENDING_FLAG = headless 가 auth_pending 만났을 때 (영맨
-  // 로그인 미완료 / refreshToken 누락). 사장님 정책 1 (2026-05-20): 사용자에게
-  // 401 노출 금지 + outbox 에 보존되어 자동 재시도 예정 → 친절한 toast 만 표시.
+  // 사장님 정책 1 (2026-05-20): 사용자에게 401 노출 금지. headless 에서 떨어진
+  // hardFail / pending flag 모두 silent 로 회수 — outbox 가 재시도하거나
+  // WebView 가 로그인 화면을 자체적으로 노출함. pending 케이스에만 친절한
+  // "세션 준비 중" toast (사장님 정책 2026-05-21).
   useEffect(() => {
     void (async () => {
       try {
         const hardFail = await AsyncStorage.getItem(AUTO_SUBMIT_AUTH_FAIL_FLAG);
         if (hardFail) {
           await AsyncStorage.removeItem(AUTO_SUBMIT_AUTH_FAIL_FLAG);
-          logError(
-            'AutoSubmit',
-            new Error('auth-fail flag found on foreground → surface modal'),
-          );
-          DeviceEventEmitter.emit(SESSION_DEAD_EVENT);
-          return;
         }
         const pending = await AsyncStorage.getItem(AUTO_SUBMIT_PENDING_FLAG);
         if (pending) {
@@ -700,7 +666,6 @@ export const WebViewHost: React.FC = () => {
     // token expiry can re-trigger the full recovery flow again.
     refreshFailureStreakRef.current = 0;
     lastReloadAtRef.current = 0;
-    sessionDeadShownRef.current = false;
     lastAuthLoginAtRef.current = Date.now();
     // 사장님 정책 (2026-05-20 late): Auth.login 은 정상 이벤트. errors.log 에
     // 기록하면 사용자가 "에러" 로 인지. dev console 만.

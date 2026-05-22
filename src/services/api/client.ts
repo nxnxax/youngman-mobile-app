@@ -3,23 +3,23 @@ import { DeviceEventEmitter } from 'react-native';
 import { API_BASE_URL } from '../../config/env';
 import {
   getAccessToken,
-  getSession,
   isAuthReady,
   isSessionExpiringSoon,
-  setSession,
   waitForAuthReady,
   waitForSessionUpdate,
 } from '../auth/session';
-import {
-  isNativeRefreshConfigured,
-  nativeRefreshSession,
-} from '../auth/nativeRefresh';
+// nativeRefresh import 제거 (2026-05-22 웹팀 요청):
+// WebView 의 _runRefreshOnce (25s cooldown, 12s timeout) 와 RN native fallback
+// 이 같은 refresh_token 을 cross-process 로 동시 소비 → cooldown 무력화 race.
+// RN 은 WebView 에 위임만 하고 직접 Supabase /auth/v1/token 을 치지 않음.
+// nativeRefresh.ts / refreshMutex 의 'native' owner 는 코드 보존 (future toggle).
 import {
   inPostSuccessCooldown,
   isBridgeAlive,
   release as releaseMutex,
   tryAcquire as tryAcquireMutex,
 } from '../auth/refreshMutex';
+import { attemptSilentReauth } from '../auth/silentReauth';
 import { rearmPendingAuth } from '../outbox/outboxStore';
 import { logError } from '../logger/errorLog';
 
@@ -128,15 +128,6 @@ export async function ensureAuthFresh(): Promise<{ ok: boolean; reason: string }
  */
 export const SESSION_REFRESH_REQUEST_EVENT = 'youngman.session.refreshRequest';
 
-/**
- * Emitted when the WebView session-refresh handler has tried and failed
- * repeatedly — the JWT is gone or invalid and no amount of WebView reloads
- * will fix it (e.g. user logged out, refresh token expired, Supabase session
- * killed). UI listens for this and surfaces an explicit "log in again"
- * prompt instead of letting background API calls churn on 401 forever.
- */
-export const SESSION_DEAD_EVENT = 'youngman.session.dead';
-
 /** Fire-and-forget: ask the WebView to push us a fresh session. Awaiting the
  *  response is done by waitForSessionUpdate(). */
 function requestSessionRefresh(): void {
@@ -184,13 +175,14 @@ async function ensureAuthReady(): Promise<void> {
   }
 }
 
-/** WebView-side refresh wait window. Short on purpose — if the WebView is
- *  alive and the bridge is responsive, fresh `auth.login` typically arrives
- *  in <500ms (localStorage fast path) or <2s (full _refreshSession call).
- *  Beyond ~5s means the bridge is stuck or dead — native fallback must take
- *  over before more 401s pile up. The 2026-05-20 incident sat through six
- *  10s/20s timeouts for nothing. */
-const WEBVIEW_REFRESH_WINDOW_MS = 5_000;
+/** WebView-side refresh wait window.
+ *
+ *  사장님 정책 (2026-05-22, 웹팀 인계 [1]): WebView _runRefreshOnce 는 자체
+ *  12s timeout + 25s cooldown 을 가짐. RN 은 WebView 에 위임만 하고 native
+ *  REST 직접 호출 안 함. 그러므로 RN 측은 WebView 의 12s timeout 보다 살짝
+ *  넉넉히 (15s) 기다린 뒤 실패 처리. bridge dead 면 즉시 false → outbox
+ *  pending_auth 보존 → Auth.login 자동 resume. */
+const WEBVIEW_REFRESH_WINDOW_MS = 15_000;
 
 // Inflight refresh dedup. Without this, concurrent 401s (e.g. billing
 // refresh + ledger sync + upload + FCM register + customer-log lookup all
@@ -199,15 +191,20 @@ const WEBVIEW_REFRESH_WINDOW_MS = 5_000;
 // Sharing one promise lets all callers await the same recovery round.
 let inflightRefresh: Promise<boolean> | null = null;
 
-/** Two-stage session refresh:
- *  1) WebView bridge — if heartbeat shows the bridge is alive, give it a
- *     short window (5s) to push a fresh `auth.login`.
- *  2) Native fallback — call Supabase REST `/auth/v1/token` directly. Works
- *     even when the WebView is dead, paused, or never loaded (headless task
- *     after a long idle). Path A 1번 single-consumer 원칙은 refreshMutex 가
- *     보장 — bridge 와 native 가 동시에 같은 refresh_token 을 소비하지 않음.
- *  `timeoutMs` is the overall budget; native fallback takes whatever is left
- *  after the WebView window (or all of it, if bridge is known dead). */
+/** Two-stage session recovery (2026-05-22 "찰거머리" 슬로건):
+ *
+ *  Stage 1 — WebView bridge:
+ *    heartbeat 살아있으면 WebView 의 _runRefreshOnce (25s cooldown + 12s
+ *    timeout) 에 위임. cross-process race 없음 (RN 은 직접 refresh 안 함).
+ *
+ *  Stage 2 — Silent re-auth (native Google idToken → Supabase id_token grant):
+ *    bridge 사망 (8h+ idle, WebView never loaded, invalid_grant) 시 발동.
+ *    refresh_token 의존 없이 Google account 의 새 idToken 으로 새 Supabase
+ *    session 발급. user_logged_out 플래그 true 면 자동 시도 차단 (사장님
+ *    명시적 로그아웃 의도 존중).
+ *
+ *  Stage 2 도 실패하면 false → outbox pending_auth 보존 → 다음 사용자 진입
+ *  에서 명시적 로그인 화면. */
 async function tryRefreshSession(timeoutMs: number = 20_000): Promise<boolean> {
   if (inflightRefresh) {
     if (__DEV__) {
@@ -229,12 +226,10 @@ async function tryRefreshSession(timeoutMs: number = 20_000): Promise<boolean> {
     const bridgeAlive = isBridgeAlive();
     logError(
       'Session.refresh',
-      new Error(
-        `start (bridgeAlive=${bridgeAlive}, nativeConfigured=${isNativeRefreshConfigured()})`,
-      ),
+      new Error(`start (bridgeAlive=${bridgeAlive})`),
     );
 
-    // === Stage 1: WebView bridge (only if heartbeat says it's alive) ===
+    // === Stage 1: WebView bridge ===
     if (bridgeAlive && tryAcquireMutex('webview')) {
       try {
         requestSessionRefresh();
@@ -243,102 +238,50 @@ async function tryRefreshSession(timeoutMs: number = 20_000): Promise<boolean> {
         const elapsed = Date.now() - overallStart;
         if (next != null) {
           releaseMutex('success');
-          logError(
-            'Session.refresh',
-            new Error(`ok bridge in ${elapsed}ms`),
-          );
-          // Drain any pending_auth backlog so outbox processor wakes up.
+          logError('Session.refresh', new Error(`ok bridge in ${elapsed}ms`));
           void rearmPendingAuth();
           return true;
         }
-        // Bridge didn't answer in time — fall through to native.
         releaseMutex('failure', `bridge timeout ${elapsed}ms`);
         logError(
           'Session.refresh',
-          new Error(`bridge timeout ${elapsed}ms — falling back to native`),
+          new Error(`bridge timeout ${elapsed}ms — falling back to silent re-auth`),
         );
       } catch (e) {
         releaseMutex('failure', e instanceof Error ? e.message : String(e));
-        throw e;
+        logError('Session.refresh', e);
+        // fall through to Stage 2
       }
+    } else if (bridgeAlive) {
+      // Another caller already holds the webview mutex — wait briefly for it.
+      const remaining = Math.max(0, timeoutMs - (Date.now() - overallStart));
+      const next = await waitForSessionUpdate(Math.min(remaining, WEBVIEW_REFRESH_WINDOW_MS));
+      if (next != null) return true;
+      // still nothing — try silent re-auth.
     }
 
-    // === Stage 2: native Supabase REST fallback ===
-    if (!isNativeRefreshConfigured()) {
-      // Config not filled in yet. We can't do anything — surface as a
-      // timeout-style failure so callers escalate to SESSION_DEAD only when
-      // appropriate. Logged loudly so it's obvious in the 24h breadcrumbs.
-      logError(
-        'Session.refresh',
-        new Error('native fallback NOT configured (SUPABASE_URL/ANON_KEY empty)'),
-      );
-      return false;
-    }
-    if (!tryAcquireMutex('native')) {
-      // Another caller is already running refresh. Wait briefly for the
-      // shared inflight slot to settle by listening for setSession().
-      const remaining = Math.max(0, timeoutMs - (Date.now() - overallStart));
-      const next = await waitForSessionUpdate(Math.min(remaining, 5_000));
-      return next != null;
-    }
-    const session = getSession();
-    const refreshToken = session?.refreshToken ?? '';
-    if (!refreshToken) {
-      releaseMutex('failure', 'no refresh_token');
-      logError(
-        'Session.refresh',
-        new Error('native fallback skipped — no refresh_token in session'),
-      );
-      return false;
-    }
-    try {
-      const result = await nativeRefreshSession(refreshToken);
+    // === Stage 2: silent re-auth via native Google idToken ===
+    const reauth = await attemptSilentReauth();
+    if (reauth.ok) {
       const elapsed = Date.now() - overallStart;
-      if (result.ok) {
-        // Commit the new session. setSession() will notify
-        // waitForSessionUpdate() listeners + sync to native SharedPreferences.
-        setSession(result.session);
-        releaseMutex('success');
-        logError(
-          'Session.refresh',
-          new Error(`ok native in ${elapsed}ms`),
-        );
-        // Tell the WebView about the new tokens so its Supabase JS doesn't
-        // run a redundant refresh on its next tick. Fire-and-forget — the
-        // bridge.js handler is documented in WEB_TEAM_REQUEST_2026-05-20.md
-        // and may not exist yet on older site builds (no-op if missing).
-        DeviceEventEmitter.emit(SESSION_SYNC_TO_WEBVIEW_EVENT, result.session);
-        // Drain pending_auth backlog.
-        void rearmPendingAuth();
-        return true;
-      }
-      releaseMutex('failure', result.message);
-      logError(
-        'Session.refresh',
-        new Error(
-          `native ${result.reason} in ${elapsed}ms: ${result.message}`,
-        ),
-      );
-      // invalid_grant = refresh_token 자체 무효. SESSION_DEAD escalate.
-      if (result.reason === 'invalid_grant') {
-        DeviceEventEmitter.emit(SESSION_DEAD_EVENT);
-      }
-      return false;
-    } catch (e) {
-      releaseMutex('failure', e instanceof Error ? e.message : String(e));
-      logError('Session.refresh', e);
-      return false;
+      logError('Session.refresh', new Error(`ok silent-reauth in ${elapsed}ms`));
+      void rearmPendingAuth();
+      return true;
     }
+    logError(
+      'Session.refresh',
+      new Error(`silent-reauth fail (${reauth.reason}) — outbox 에서 Auth.login resume 대기`),
+    );
+    return false;
   })().finally(() => {
     inflightRefresh = null;
   });
   return inflightRefresh;
 }
 
-/** Fired after a successful native fallback refresh so the WebView can
- *  reconcile its localStorage / Supabase JS state. WebViewHost listens and
- *  injects a `setSession` call into the page. */
-export const SESSION_SYNC_TO_WEBVIEW_EVENT = 'youngman.session.syncToWebView';
+// SESSION_SYNC_TO_WEBVIEW_EVENT 의 정의/emit 은 services/auth/silentReauth.ts
+// 로 이동 (2026-05-22 "찰거머리" 구조). 동일 string event name 유지하여 기존
+// WebViewHost listener 는 그대로 동작.
 
 /** Quietly try to refresh BEFORE a slow flow if the cached token looks stale.
  *  Best-effort — caller can ignore the return.

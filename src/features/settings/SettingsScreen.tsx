@@ -149,7 +149,7 @@ export const SettingsScreen: React.FC = () => {
           )}
         </Section>
 
-        <Section title="모달 자동 닫힘 시간">
+        <Section title="AI요약 안내 팝업 자동 닫힘 시간">
           {DWELL_OPTIONS.map(opt => (
             <Row
               key={opt.value}
@@ -175,6 +175,41 @@ export const SettingsScreen: React.FC = () => {
               thumbColor="#FFFFFF"
             />
           </View>
+        </Section>
+
+        <Section
+          title="전화올때 상단팝업 활성화"
+          footer="고객관리대장에 등록된 고객 전화올때 상단팝업에서 기존 통화내용을 미리보기해줍니다"
+        >
+          <Row
+            label="활성화"
+            selected={settings.incomingCallPopupEnabled}
+            onPress={() => patch({ incomingCallPopupEnabled: true })}
+          />
+          <Row
+            label="해제"
+            selected={!settings.incomingCallPopupEnabled}
+            onPress={() => patch({ incomingCallPopupEnabled: false })}
+          />
+          {settings.incomingCallPopupEnabled && (
+            <>
+              <Row
+                label="활성화 시간 5초"
+                selected={settings.incomingCallPopupDurationSec === 5}
+                onPress={() => patch({ incomingCallPopupDurationSec: 5 })}
+              />
+              <Row
+                label="활성화 시간 10초"
+                selected={settings.incomingCallPopupDurationSec === 10}
+                onPress={() => patch({ incomingCallPopupDurationSec: 10 })}
+              />
+              <Row
+                label="활성화 시간 15초"
+                selected={settings.incomingCallPopupDurationSec === 15}
+                onPress={() => patch({ incomingCallPopupDurationSec: 15 })}
+              />
+            </>
+          )}
         </Section>
 
         <Section

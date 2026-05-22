@@ -18,6 +18,12 @@ export interface AppSettings {
   keywords: string;
   /** Master switch — when off, the CallStateReceiver path is bypassed. */
   realtimeDetection: boolean;
+  /** Heads-up notification when an incoming call matches a saved customer.
+   *  사장님 정책 (2026-05-22): 사용자가 화면 상단 정보 가림을 싫어하면 OFF. */
+  incomingCallPopupEnabled: boolean;
+  /** Heads-up 유지 시간 (초). 시스템 OEM 이 heads-up visible 자체는 5초쯤
+   *  강제하지만, setTimeoutAfter 로 drawer notification 자체 lifetime 을 제어. */
+  incomingCallPopupDurationSec: 5 | 10 | 15;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -26,6 +32,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   popupFrequency: 'always',
   keywords: '사장님, 사모님',
   realtimeDetection: true,
+  incomingCallPopupEnabled: true,
+  incomingCallPopupDurationSec: 10,
 };
 
 interface NativeSettingsBridge {

@@ -14,6 +14,22 @@ export const APP_VERSION = '1.0.0';
 
 export const USER_AGENT_SUFFIX = `YoungmanApp/${APP_VERSION}`;
 
+/** 사장님 정책 (2026-05-21): Play Store 정식 출시 전 테스트 기간. 결제사
+ *  (PortOne/TossPayments) 승인 + Google Play 등록 완료 시 false 로 변경하면
+ *  모든 결제 권유 UI (UsageBanner, PlanGateModal 등) 가 원래대로 복원됨.
+ *  현재 true: 결제 권유 자리에 "테스트기간 무료이벤트 다운로드 바로가기" 표시 +
+ *  탭하면 TesterScreen (APK 직접 설치 안내) 으로 이동. */
+export const TESTER_MODE = true;
+
+/** Tester 페이지의 APK 다운로드 URL. 웹팀 (cafe24) 호스팅. 새 빌드 배포 시
+ *  같은 파일명으로 덮어쓰기 → URL 그대로 유지. */
+export const TESTER_APK_URL =
+  'https://youngman-biz.com/download/youngman-latest.apk';
+
+// 사장님 정책 (2026-05-22 UX): 영맨 여자 비서 캐릭터 PNG 는 RN bundle 에 내장
+// (src/features/callRecording/components/assets/loading-secretary.png). 외부 호스팅
+// 의존 X. cafe24 URL 방식 제거됨.
+
 // Firebase Web OAuth 2.0 client ID — used by native Google Sign-In SDK to
 // request an ID token that the backend can verify. NOT a secret (it is a
 // public client identifier embedded in the app).

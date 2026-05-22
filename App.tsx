@@ -12,6 +12,7 @@ import { ManufacturerGuideScreen } from './src/features/settings/ManufacturerGui
 import { SettingsScreen } from './src/features/settings/SettingsScreen';
 import { UnreviewedPreviewScreen } from './src/features/unreviewedSummaries/UnreviewedPreviewScreen';
 import { UnreviewedSummariesScreen } from './src/features/unreviewedSummaries/UnreviewedSummariesScreen';
+import { TesterScreen } from './src/features/tester/TesterScreen';
 import {
   attachIncomingCallListener,
   detachIncomingCallListener,
@@ -21,7 +22,14 @@ import { isAllGranted } from './src/features/onboarding/permissions';
 import { usePermissionStatus } from './src/features/onboarding/usePermissionStatus';
 import type { RootStackParamList } from './src/navigation/types';
 import { restoreSession } from './src/services/auth/session';
+import { installGlobalErrorHandler } from './src/services/logger/errorLog';
 import { WebViewHost } from './src/features/webview/WebViewHost';
+
+// 사장님 정책 (2026-05-22 PM 진단): ErrorLog 가 항상 비어있는 도미노 fix.
+// installGlobalErrorHandler 가 정의만 있고 호출 안 됨 → JS uncaught exception
+// 이 ErrorLog file 에 안 들어감. App import 시점에 1회 설치 — 그 이후 모든
+// JS uncaught 가 자동으로 ErrorLog 에 기록됨.
+installGlobalErrorHandler();
 
 // 사장님 정책 (2026-05-21): cold start 자동로그인 가속 + "세션 만료" alert
 // 차단. 이전엔 WebView 가 cafe24 페이지 fetch + Supabase JS 실행 + bridge
@@ -108,12 +116,18 @@ function App(): React.JSX.Element {
           <Stack.Screen
             name="ConfirmRecording"
             component={ConfirmRecordingScreen}
-            options={{ presentation: 'modal' }}
+            options={{ presentation: 'modal', animation: 'fade' }}
           />
           <Stack.Screen
             name="SummaryReview"
             component={SummaryReviewScreen}
-            options={{ presentation: 'modal' }}
+            options={{
+              // 사장님 정책 (v36 2026-05-23): 흰 배경 풀스크린 (검정 배경 X,
+              // transparent도 X — 사장님 디자인 명시). animation none → ConfirmRecording
+              // 의 LoadingSecretary 와 transition 없이 자연스럽게.
+              presentation: 'modal',
+              animation: 'none',
+            }}
           />
           <Stack.Screen
             name="Settings"
@@ -137,6 +151,11 @@ function App(): React.JSX.Element {
           <Stack.Screen
             name="UnreviewedPreview"
             component={UnreviewedPreviewScreen}
+          />
+          <Stack.Screen
+            name="Tester"
+            component={TesterScreen}
+            options={{ presentation: 'modal' }}
           />
         </Stack.Navigator>
       </NavigationContainer>

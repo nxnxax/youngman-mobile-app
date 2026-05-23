@@ -1,6 +1,26 @@
 import { apiPost } from '../../../services/api/client';
 import type { ProcessRecordingResponse } from './types';
 
+// 사장님 정책 (2026-05-23 spec): /process-recording.php 가 lazy-STT 모드로 변경.
+// 통화 종료 직후 자동 STT 안 함. audio_pending 응답만 받고 사용자 trigger 시점에
+// trigger_summarize 로 STT 시작. customer_log 필드 없음, job_id + job_status 만.
+//
+// 사장님 정책 (2026-05-23 웹팀 회신 추가): audio_sha256 dedup hit 시
+//   { duplicate: true, error_code: 'JOB_DUPLICATE', job_id, ... } 반환.
+//   같은 audio 재전송 케이스 (PoC 중 재시도 등) 만 — 정상 통화는 미발생.
+//   client 는 동일 job_id 로 UnreviewedPreview navigate (Toast 로 알림).
+export interface ProcessRecordingAudioPendingResponse {
+  status: 'ok';
+  ok: true;
+  job_id: string;
+  job_status: 'audio_pending';
+  mode?: 'audio_pending';
+  placeholder?: false;
+  server_elapsed_ms?: number;
+  duplicate?: boolean;
+  error_code?: 'JOB_DUPLICATE' | string;
+}
+
 export interface ProcessRecordingInput {
   storage_path: string;
   duration_sec: number;
@@ -47,6 +67,18 @@ export async function processRecording(
   input: ProcessRecordingInput,
 ): Promise<ProcessRecordingResponse> {
   return apiPost<ProcessRecordingResponse>('/process-recording.php', input);
+}
+
+/** 사장님 정책 (2026-05-23 spec): lazy-STT 모드. 영맨 backend 가 audio_pending
+ *  으로 응답 (customer_log 없음). 사용자가 "요약보기" 누를 때 trigger_summarize
+ *  호출해서 STT 시작. v39+ 호환. */
+export async function processRecordingAudioPending(
+  input: ProcessRecordingInput,
+): Promise<ProcessRecordingAudioPendingResponse> {
+  return apiPost<ProcessRecordingAudioPendingResponse>(
+    '/process-recording.php',
+    input,
+  );
 }
 
 /** Async path — returns immediately with a job_id. Caller polls

@@ -7,6 +7,7 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,13 +15,14 @@ import {
   ToastAndroid,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ApiError } from '../../services/api/client';
 import { logError } from '../../services/logger/errorLog';
 import {
   confirmUnreviewed,
-  fetchSummaryStatus,
+  discardUnreviewed,
+  previewUnreviewed,
   triggerSummarize,
   type UnreviewedDetail,
 } from '../callRecording/api/unreviewed';
@@ -67,63 +69,96 @@ export const UnreviewedPreviewScreen: React.FC = () => {
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const route = useRoute<RouteProp<RootStackParamList, 'UnreviewedPreview'>>();
   const jobId = route.params.jobId;
+  const insets = useSafeAreaInsets();
 
   const [detail, setDetail] = useState<UnreviewedDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [confirming, setConfirming] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
 
   useEffect(() => {
-    // 사장님 정책 (2026-05-21 STT 흐름 근본 구조 개선, 웹팀 commit 4256cbd):
-    // trigger_summarize 응답 분기:
-    //   ok=true: 즉시 결과 표시
-    //   processing=true: 5초 간격으로 summary_status polling
-    //   ok=false + STT_FAILED: 실패 UI
+    // 사장님 정책 (v48 2026-05-23 영맨 commit f0b9524): trigger_summarize 응답에
+    // ok / processing 필드 명시. preview endpoint 로 polling.
+    //   r.ok=false → 에러 표시 (r.message)
+    //   r.ok=true & r.processing=true → preview endpoint 2초 polling (ready 까지)
+    //   r.ok=true & r.processing=false (ready_to_review) → 즉시 preview endpoint 호출
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const POLL_MAX_TRIES = 60;  // 5min budget @ 5sec interval
+    const POLL_MAX_TRIES = 150; // 5min budget @ 2sec interval
 
+    // 사장님 정책 (v49 2026-05-23 영맨 회신): preview endpoint 응답에는
+    // ok/processing 필드 없음 (영맨 webteam 이 trigger_summarize 만 fix 함).
+    // job_status 기반으로 분기 — 영맨 응답 형태와 무관하게 작동.
+    //   ready_to_review / saved → 완료 (summary 표시)
+    //   failed_permanent → 실패
+    //   그 외 (audio_pending/queued/stt_processing/llm_processing) → polling 계속
     const startPolling = (delaySec: number, tries: number) => {
       if (cancelled || tries >= POLL_MAX_TRIES) return;
       timer = setTimeout(async () => {
         if (cancelled) return;
         try {
-          const status = await fetchSummaryStatus(jobId);
+          const detail = await previewUnreviewed(jobId);
           if (cancelled) return;
-          setDetail(status);
-          if (status.ok) {
+          logError(
+            'diag.preview',
+            new Error(`jobId=${jobId} tries=${tries} response=${JSON.stringify(detail)}`),
+          );
+          setDetail(detail);
+          const js = detail.job_status;
+          if (js === 'ready_to_review' || js === 'saved') {
             setLoading(false);
             return;
           }
-          if (status.processing) {
-            // 다시 polling.
-            startPolling(status.retry_after_seconds ?? 5, tries + 1);
-          } else {
-            // ok=false + processing=false = 실패. STT_FAILED 등.
+          if (js === 'failed_permanent') {
             setLoading(false);
+            return;
           }
+          // audio_pending / queued / stt_processing / llm_processing → polling 계속
+          startPolling(2, tries + 1);
         } catch (e) {
           if (!(e instanceof ApiError && e.code === 'auth_pending')) {
             logError('UnreviewedPreview.poll', e, { jobId, tries });
           }
-          // 네트워크 일시 에러 — 재시도.
-          startPolling(5, tries + 1);
+          startPolling(2, tries + 1);
         }
       }, delaySec * 1000);
+    };
+
+    const fetchPreviewImmediate = async () => {
+      try {
+        const detail = await previewUnreviewed(jobId);
+        if (cancelled) return;
+        logError(
+          'diag.preview.immediate',
+          new Error(`jobId=${jobId} response=${JSON.stringify(detail)}`),
+        );
+        setDetail(detail);
+        setLoading(false);
+      } catch (e) {
+        if (!(e instanceof ApiError && e.code === 'auth_pending')) {
+          logError('UnreviewedPreview.previewImmediate', e, { jobId });
+        }
+        setLoading(false);
+      }
     };
 
     void (async () => {
       try {
         const res = await triggerSummarize(jobId);
         if (cancelled) return;
+        logError(
+          'diag.triggerSummarize',
+          new Error(`jobId=${jobId} response=${JSON.stringify(res)}`),
+        );
         setDetail(res);
-        if (res.ok) {
+        if (!res.ok) {
           setLoading(false);
-        } else if (res.processing) {
-          // server 가 STT 진행 중 — polling 시작.
-          startPolling(res.retry_after_seconds ?? 5, 0);
+          return;
+        }
+        if (res.processing) {
+          startPolling(2, 0);
         } else {
-          // 실패 (STT_FAILED 등).
-          setLoading(false);
+          await fetchPreviewImmediate();
         }
       } catch (e) {
         if (!(e instanceof ApiError && e.code === 'auth_pending')) {
@@ -146,14 +181,14 @@ export const UnreviewedPreviewScreen: React.FC = () => {
   }, [jobId, navigation]);
 
   const onConfirm = useCallback(async () => {
-    if (confirming) return;
+    if (confirming || discarding) return;
     setConfirming(true);
     try {
       const res = await confirmUnreviewed(jobId);
       if (res.duplicate || res.error_code === 'JOB_EXISTS') {
         ToastAndroid.show('이미 저장된 통화입니다.', ToastAndroid.LONG);
       } else {
-        ToastAndroid.show('고객관리대장에 저장됐습니다.', ToastAndroid.LONG);
+        ToastAndroid.show('고객관리대장에 전송됐습니다.', ToastAndroid.LONG);
       }
       navigation.goBack();
     } catch (e) {
@@ -164,7 +199,54 @@ export const UnreviewedPreviewScreen: React.FC = () => {
     } finally {
       setConfirming(false);
     }
-  }, [confirming, jobId, navigation]);
+  }, [confirming, discarding, jobId, navigation]);
+
+  // 사장님 정책 (2026-05-23 spec C): "요약 폐기" → discard endpoint.
+  const onDiscard = useCallback(() => {
+    if (confirming || discarding) return;
+    Alert.alert(
+      '요약내용을 폐기하시겠습니까?',
+      '폐기하면 통화 요약과 관련 데이터가 모두 삭제됩니다.',
+      [
+        { text: '아니요', style: 'cancel' },
+        {
+          text: '네',
+          style: 'destructive',
+          onPress: () => {
+            setDiscarding(true);
+            discardUnreviewed(jobId)
+              .catch(e => logError('UnreviewedPreview.discard', e, { jobId }))
+              .finally(() => {
+                setDiscarding(false);
+                navigation.goBack();
+              });
+          },
+        },
+      ],
+    );
+  }, [confirming, discarding, jobId, navigation]);
+
+  // 사장님 정책 (2026-05-23 spec B): X 버튼 → "폐기/보류" Alert.
+  //   폐기 → discard endpoint, 보류 → goBack (백그라운드 STT 계속, 미확인 요약 자동 추가)
+  const onCloseX = useCallback(() => {
+    Alert.alert('요약을 어떻게 할까요?', '', [
+      { text: '취소', style: 'cancel' },
+      {
+        text: '보류 (미확인 요약에 보관)',
+        onPress: () => navigation.goBack(),
+      },
+      {
+        text: '폐기',
+        style: 'destructive',
+        onPress: () => {
+          discardUnreviewed(jobId).catch(e =>
+            logError('UnreviewedPreview.xDiscard', e, { jobId }),
+          );
+          navigation.goBack();
+        },
+      },
+    ]);
+  }, [jobId, navigation]);
 
   return (
     <SafeAreaView style={styles.root} edges={['top']}>
@@ -183,7 +265,9 @@ export const UnreviewedPreviewScreen: React.FC = () => {
           </View>
           <Text style={styles.headerSubtitle}>요약 검토</Text>
         </View>
-        <View style={styles.backButton} />
+        <Pressable onPress={onCloseX} style={styles.backButton} hitSlop={12}>
+          <Text style={styles.xButton}>×</Text>
+        </Pressable>
       </View>
 
       {!detail ? (
@@ -210,22 +294,24 @@ export const UnreviewedPreviewScreen: React.FC = () => {
 
             <View style={styles.hairline} />
 
-            {detail.processing ? (
-              <View style={styles.statusBlock}>
-                <ActivityIndicator color="#0066FF" />
+            {/* 사장님 정책 (v49 2026-05-23): preview 응답에 ok/processing 필드
+                없음 (영맨 webteam fix 누락). job_status 기반 분기 — 영맨 응답
+                형태와 무관하게 작동. */}
+            {!detail.summary ? (
+              detail.job_status === 'failed_permanent' ? (
                 <Text style={styles.placeholderNote}>
-                  AI 가 요약 중입니다.{'\n'}
-                  잠시만 기다려주세요.
+                  요약 처리에 실패했어요.
+                  {detail.last_error ? `\n(${detail.last_error})` : ''}
                 </Text>
-              </View>
-            ) : !detail.ok ? (
-              <Text style={styles.placeholderNote}>
-                {detail.error_code === 'STT_FAILED'
-                  ? `요약 처리에 실패했어요.${
-                      detail.last_error ? `\n(${detail.last_error})` : ''
-                    }`
-                  : '요약 결과를 불러올 수 없어요.'}
-              </Text>
+              ) : (
+                <View style={styles.statusBlock}>
+                  <ActivityIndicator color="#0066FF" />
+                  <Text style={styles.placeholderNote}>
+                    AI 가 요약 중입니다.{'\n'}
+                    잠시만 기다려주세요.
+                  </Text>
+                </View>
+              )
             ) : null}
 
             {detail.summary ? (
@@ -249,16 +335,23 @@ export const UnreviewedPreviewScreen: React.FC = () => {
       )}
 
       {detail ? (
-        <View style={styles.footerBar}>
+        <View style={[styles.footerBar, { paddingBottom: 12 + insets.bottom }]}>
+          <Pressable
+            onPress={onDiscard}
+            disabled={confirming || discarding}
+            style={[styles.discardButton, (confirming || discarding) && styles.submitDisabled]}
+          >
+            <Text style={styles.discardText}>요약 폐기</Text>
+          </Pressable>
           <Pressable
             onPress={() => void onConfirm()}
-            disabled={confirming}
-            style={[styles.submitButton, confirming && styles.submitDisabled]}
+            disabled={confirming || discarding}
+            style={[styles.submitButton, (confirming || discarding) && styles.submitDisabled]}
           >
             {confirming ? (
               <ActivityIndicator color="#FFFFFF" />
             ) : (
-              <Text style={styles.submitText}>고객관리대장에 저장</Text>
+              <Text style={styles.submitText}>고객관리대장 전송</Text>
             )}
           </Pressable>
         </View>
@@ -352,8 +445,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#E5E5E5',
+    flexDirection: 'row',
+    gap: 10,
   },
   submitButton: {
+    flex: 1,
     backgroundColor: '#0066FF',
     borderRadius: 12,
     paddingVertical: 15,
@@ -361,4 +457,22 @@ const styles = StyleSheet.create({
   },
   submitDisabled: { opacity: 0.6 },
   submitText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
+  // 사장님 정책 (2026-05-23 spec C): "요약 폐기" 버튼 — 좌측. discard endpoint.
+  discardButton: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingVertical: 15,
+    paddingHorizontal: 18,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
+  },
+  discardText: { color: '#FF3B30', fontSize: 15, fontWeight: '600' },
+  // 사장님 정책 (2026-05-23 spec B): 헤더 우측 X 버튼.
+  xButton: {
+    fontSize: 24,
+    color: '#666666',
+    lineHeight: 28,
+    fontWeight: '300',
+  },
 });

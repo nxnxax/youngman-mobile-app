@@ -208,6 +208,11 @@ export const SettingsScreen: React.FC = () => {
                 selected={settings.incomingCallPopupDurationSec === 15}
                 onPress={() => patch({ incomingCallPopupDurationSec: 15 })}
               />
+              <Row
+                label="활성화 시간 20초"
+                selected={settings.incomingCallPopupDurationSec === 20}
+                onPress={() => patch({ incomingCallPopupDurationSec: 20 })}
+              />
             </>
           )}
         </Section>

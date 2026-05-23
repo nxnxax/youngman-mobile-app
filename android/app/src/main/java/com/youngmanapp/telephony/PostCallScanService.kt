@@ -27,6 +27,7 @@ import com.youngmanapp.R
 import com.youngmanapp.callrecording.CallRecordingClassifier
 import com.youngmanapp.callrecording.RecordingState
 import com.youngmanapp.logging.ErrorLog
+import com.youngmanapp.overlay.AutoSubmitService
 import com.youngmanapp.overlay.CallPostActivity
 import com.youngmanapp.overlay.LockScreenLauncherActivity
 import com.youngmanapp.overlay.OverlayService
@@ -217,9 +218,54 @@ class PostCallScanService : Service() {
       dateAdded = tsSec,
       duration = duration,
     )
-    Log.d(TAG, "direct match (CLOSE_WRITE): ${file.name} duration=$duration")
-    CallPostActivity.startWithData(this, found)
+    // 사장님 정책 (v53 2026-05-24): placeholder 모달에서 [양식에 전송] 이미
+    // 눌렸으면 trigger_summarize 까지 진행 + 모달 startWithData skip
+    // (사장님이 이미 모달 닫음).
+    val pendingSubmit = com.youngmanapp.overlay.PendingSubmitFlag.consume(this)
+    Log.d(TAG, "direct match (CLOSE_WRITE): ${file.name} duration=$duration pendingSubmit=$pendingSubmit")
+    startAutoSubmitInBackground(found, pendingReview = !pendingSubmit)
+    // 사장님 정책 (v46 2026-05-23): 옛 파일 (방금 통화 아닌 잔재) 은 모달 표시
+    // 안 함 — audio_pending 자동 보관만, 미확인 요약 페이지에서 처리.
+    if (isFreshRecording(found.dateAdded) && !pendingSubmit) {
+      CallPostActivity.startWithData(this, found)
+    } else {
+      Log.d(TAG, "skip modal: stale=${!isFreshRecording(found.dateAdded)} pendingSubmit=$pendingSubmit")
+    }
     mainHandler.post { stopSelfSafely() }
+  }
+
+  /** 사장님 정책 (v45 2026-05-23 영맨 긴급): file 매칭 시점에 background
+   *  autoSubmitTask 자동 시작 (audio_pending 까지만). CallPostActivity 의
+   *  onNewIntent 발동 여부 (BAL 차단 가능성) 와 무관하게 audio 가 무조건 영맨
+   *  recording_jobs 에 INSERT → 미확인 요약 자동 보관. 사용자가 모달 [취소]
+   *  하든 자동 dismiss 되든 audio_pending 으로 보관. trigger_summarize 는 사용자가
+   *  미확인 요약에서 명시적으로 호출. [양식에 전송] click 시 같은 file 이라
+   *  dedup hit 으로 같은 job_id 반환 → trigger_summarize(auto_confirm=true).
+   *
+   *  pendingReview=true 로 호출 → autoSubmitTask 가 trigger_summarize skip. */
+  /** 사장님 정책 (v46 2026-05-23): "방금 통화" 판정 — dateAdded 가 현재 시각의
+   *  60초 안. 그 이상 옛 파일은 잔재 (이전 통화 미처리). 잔재는 모달 표시 X,
+   *  audio_pending 으로 미확인 요약 자동 보관. */
+  private fun isFreshRecording(dateAddedSec: Long): Boolean {
+    val nowSec = System.currentTimeMillis() / 1000
+    return dateAddedSec >= nowSec - 60
+  }
+
+  private fun startAutoSubmitInBackground(found: FoundFile, pendingReview: Boolean = true) {
+    val intent = Intent(this, AutoSubmitService::class.java).apply {
+      putExtra(OverlayService.EXTRA_URI, found.uri)
+      putExtra(OverlayService.EXTRA_NAME, found.displayName)
+      putExtra(OverlayService.EXTRA_DURATION, found.duration)
+      putExtra(OverlayService.EXTRA_DATE_ADDED, found.dateAdded)
+      putExtra(OverlayService.EXTRA_MIME, "audio/mp4")
+      putExtra(OverlayService.EXTRA_PENDING_REVIEW, pendingReview)
+    }
+    try {
+      startService(intent)
+      Log.d(TAG, "startAutoSubmitInBackground OK: ${found.displayName} pendingReview=$pendingReview")
+    } catch (e: Throwable) {
+      Log.w(TAG, "startAutoSubmitInBackground failed", e)
+    }
   }
 
   private fun unregisterFileObservers() {
@@ -276,7 +322,18 @@ class PostCallScanService : Service() {
               // worker 에서 안전. main thread post latency 제거 = 모달 즉시.
               // 사장님 정책 (2026-05-22 §3 fullscreen Activity 모달): Activity 자체는
               // SYSTEM_ALERT_WINDOW 권한 무관. 항상 CallPostActivity 시작.
-              CallPostActivity.startWithData(this@PostCallScanService, found)
+              // 사장님 정책 (v53 2026-05-24): placeholder 모달 [양식에 전송]
+              // 이미 click 됐으면 trigger_summarize 까지 + 모달 표시 skip.
+              val pendingSubmit =
+                com.youngmanapp.overlay.PendingSubmitFlag.consume(this@PostCallScanService)
+              startAutoSubmitInBackground(found, pendingReview = !pendingSubmit)
+              // 사장님 정책 (v46 2026-05-23): 옛 파일 (방금 통화 아닌 잔재) 은
+              // 모달 표시 안 함. 미확인 요약 페이지로 자동 보관 (audio_pending).
+              if (isFreshRecording(found.dateAdded) && !pendingSubmit) {
+                CallPostActivity.startWithData(this@PostCallScanService, found)
+              } else {
+                Log.d(TAG, "skip modal: stale=${!isFreshRecording(found.dateAdded)} pendingSubmit=$pendingSubmit")
+              }
               // service 라이프사이클만 main 으로 escalate.
               mainHandler.post { stopSelfSafely() }
               return

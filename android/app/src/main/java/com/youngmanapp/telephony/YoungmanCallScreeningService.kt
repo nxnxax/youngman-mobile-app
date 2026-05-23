@@ -5,6 +5,7 @@ import android.telecom.CallScreeningService
 import android.util.Log
 import com.facebook.react.ReactApplication
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import com.youngmanapp.auth.AuthStore
 import com.youngmanapp.auth.CustomerLogClient
 import com.youngmanapp.billing.PlanCache
 import com.youngmanapp.overlay.IncomingCallNotifier
@@ -51,6 +52,12 @@ class YoungmanCallScreeningService : CallScreeningService() {
     }
     if (!settings.incomingCallPopupEnabled) {
       Log.d(TAG, "incomingCallPopupEnabled off — skip")
+      return
+    }
+    // 사장님 정책 (v51 2026-05-23): 로그아웃 상태에선 통화 전 팝업 / 요약 기능
+    // 작동 안 함. JWT 없으면 발신자 식별 / 모달 표시 skip.
+    if (AuthStore.readJwt(this).isNullOrEmpty()) {
+      Log.d(TAG, "user is logged out — skip incoming banner")
       return
     }
 

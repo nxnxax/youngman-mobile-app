@@ -68,10 +68,16 @@ const COPY: Record<PermissionStep, CardCopy> = {
   },
 };
 
+// 사장님 정책 (2026-05-23): 타 스팸차단앱과 충돌 시 overlay / callScreening
+// 권한 false positive 빈발 (Samsung 펌웨어 + role 점유 다른 앱).
+//   - callScreening: system role 은 한 앱만 가질 수 있어 다른 스팸앱이 점유 중이면
+//     영맨 자동 silent skip — 상단팝업 안 뜨는 것 정상 동작 (사장님이 인정).
+//   - overlay: canDrawOverlays() 가 다른 overlay 앱 활성 중일 때 false 로 잘못 반환
+//     되는 케이스. 이미 사용자가 onboarding 에서 grant 한 경우에도 카드 반복 표시.
+// 두 카드 자동 유도 제거 — 진짜 회수 케이스는 onboarding 재진입 또는 사용자 직접
+// Settings 에서 처리 (trade-off 감수).
 const ORDER: PermissionStep[] = [
   'runtime',
-  'overlay',
-  'callScreening',
   'battery',
 ];
 

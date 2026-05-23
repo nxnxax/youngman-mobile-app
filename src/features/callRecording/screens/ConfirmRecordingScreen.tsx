@@ -9,6 +9,7 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  ToastAndroid,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -27,8 +28,7 @@ import {
 } from '../../../services/billing/billingStore';
 import { lookupContactName } from '../../../services/contacts/lookupContact';
 import { deterministicRequestId } from '../../../shared/uuid';
-import { fetchLedgerGroups } from '../api/records';
-import type { LedgerGroup } from '../api/types';
+import { processRecordingAudioPending } from '../api/processRecording';
 import { uploadRecording } from '../api/uploadRecording';
 import { extractPhoneNumber } from '../scanner/heuristics';
 import { LoadingSecretary } from '../components/LoadingSecretary';
@@ -107,39 +107,35 @@ export const ConfirmRecordingScreen: React.FC = () => {
       return;
     }
     try {
+      // 사장님 정책 (2026-05-23 spec lazy-STT): 통화 종료 → upload + processRecording
+      // 호출 → audio_pending 응답 (job_id 만 받음, STT 자동 시작 X). UnreviewedPreview
+      // 진입 시 trigger_summarize 호출로 STT 시작. groups fetch 불필요 (전송 시점은
+      // confirm endpoint 가 처리).
       const contactName = await lookupContactName(phoneNumber);
-      // Upload + groups in parallel — groups call is fast (~ms) and the user
-      // will need it on the SummaryReview group picker; no reason to defer.
-      const [uploaded, groupsRes] = await Promise.all([
-        uploadRecording({
-          contentUri: uri,
-          displayName: name,
-          mimeType: mimeType || 'audio/mp4',
-          recordedAt,
-        }),
-        fetchLedgerGroups('customer').catch(err => {
-          if (__DEV__) {
-            console.log('[ConfirmRecording] fetchLedgerGroups failed', err);
-          }
-          return { groups: [] as ReadonlyArray<LedgerGroup> };
-        }),
-      ]);
-
-      // Hand off the rest of the work to SummaryReview as a pendingJob. The
-      // user perceives the transition as "tap → form (loading)" instead of
-      // "tap → spinner for 7s → form".
-      navigation.replace('SummaryReview', {
-        pendingJob: {
-          storage_path: uploaded.storage_path,
-          duration_sec: Math.round(duration / 1000),
-          original_filename: name,
-          recorded_at: recordedAt,
-          phone_number: phoneNumber,
-          client_request_id: deterministicRequestId(uri),
-          customer_name_hint: contactName,
-        },
-        availableGroups: groupsRes.groups,
+      const uploaded = await uploadRecording({
+        contentUri: uri,
+        displayName: name,
+        mimeType: mimeType || 'audio/mp4',
+        recordedAt,
       });
+      const res = await processRecordingAudioPending({
+        storage_path: uploaded.storage_path,
+        duration_sec: Math.round(duration / 1000),
+        original_filename: name,
+        recorded_at: recordedAt,
+        phone_number: phoneNumber,
+        client_request_id: deterministicRequestId(uri),
+        customer_name_hint: contactName,
+      });
+      // 사장님 정책 (2026-05-23 웹팀 회신): audio_sha256 dedup hit 시 동일
+      // job_id 반환 + duplicate=true. PoC 재시도 케이스라 사용자에게 toast 만.
+      if (res.duplicate || res.error_code === 'JOB_DUPLICATE') {
+        ToastAndroid.show(
+          '이미 처리 중인 통화예요. 기존 요약을 표시합니다.',
+          ToastAndroid.LONG,
+        );
+      }
+      navigation.replace('UnreviewedPreview', { jobId: res.job_id });
     } catch (e) {
       if (e instanceof ApiError && e.code === 'plan_required') {
         // Server flipped on us between the pre-call check and upload.

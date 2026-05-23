@@ -38,7 +38,17 @@ import com.youngmanapp.telephony.PostCallScanService
 class CallPostActivity : Activity() {
 
   private val handler = Handler(Looper.getMainLooper())
-  private val autoDismiss = Runnable { finish() }
+  // 사장님 정책 (v44 2026-05-23 영맨 긴급): 모달 자동 종료 시 audio 업로드
+  // (processRecording audio_pending) 만 background 호출 → 미확인 요약 자동 보관.
+  // trigger_summarize 는 호출 X (pendingReview=true 로 분기). 사용자가 미확인
+  // 요약에서 나중에 trigger. 사용자가 명시적 [취소] 누른 경우만 단순 finish (폐기).
+  private val autoDismiss = Runnable {
+    val u = currentUri
+    if (u != null) {
+      startAutoSubmit(u, currentName, currentDuration, currentDateAdded, currentMimeType, true)
+    }
+    finish()
+  }
 
   // 사장님 정책 (2026-05-22 UX): placeholder 모드에서 "처리중" / "AI 분석 중"
   // 같은 시스템 상태 텍스트 노출 금지. dots pulse 만 표시 (cafe24 commit 5145cb5
@@ -171,7 +181,7 @@ class CallPostActivity : Activity() {
       } else if (pendingSubmitClick) {
         pendingSubmitClick = false
         startAutoSubmit(uri, name, duration, dateAdded, mimeType, false)
-        handler.postDelayed({ finish() }, 2000)
+        finish()
       }
     }
     isFirstBind = false
@@ -201,14 +211,26 @@ class CallPostActivity : Activity() {
     }
 
     findViewById<View>(R.id.overlay_btn_submit).setOnClickListener {
-      showLoadingCard()
+      // 사장님 정책 (v53 2026-05-24): 양식에 전송은 native loading 표시 X.
+      // 응답 (file 매칭) 와 무관하게 모달 즉시 닫고 background 처리.
+      //   - 정상 (currentUri != null): 즉시 startAutoSubmit + finish.
+      //   - placeholder (currentUri == null, file 매칭 전): PendingSubmitFlag set
+      //     + finish. PostCallScanService 가 file 매칭하면 flag consume →
+      //     pendingReview=false 로 background autoSubmit (trigger_summarize 까지).
+      // 영맨 backend (commit d4a6d70) 가 placeholder customer_log 자동 mirror →
+      // 고객관리대장에 "AI 요약 처리 중..." 카드. callback 완료 시 실제 요약 UPDATE + FCM.
+      // [요약보기] 흐름은 그대로 (line 197 review handler 의 showLoadingCard 유지).
+      android.widget.Toast.makeText(
+        this, "고객관리대장에 저장 중입니다", android.widget.Toast.LENGTH_SHORT,
+      ).show()
       val u = currentUri
       if (u == null) {
-        pendingSubmitClick = true
+        PendingSubmitFlag.set(this)
+        finish()
         return@setOnClickListener
       }
       startAutoSubmit(u, currentName, currentDuration, currentDateAdded, currentMimeType, false)
-      handler.postDelayed({ finish() }, 2000)
+      finish()
     }
 
     scheduleAutoDismiss()
@@ -232,6 +254,7 @@ class CallPostActivity : Activity() {
   private fun showLoadingCard() {
     handler.removeCallbacks(autoDismiss)
     stopDots()
+    stopCountdown()
     findViewById<View>(R.id.overlay_normal_card)?.visibility = View.GONE
     val loadingCard = findViewById<View>(R.id.overlay_loading_card) ?: return
     loadingCard.visibility = View.VISIBLE
@@ -304,7 +327,36 @@ class CallPostActivity : Activity() {
   private fun scheduleAutoDismiss() {
     handler.removeCallbacks(autoDismiss)
     val dwell = SettingsStore.read(this).modalDwellMs
-    handler.postDelayed(autoDismiss, if (dwell > 0) dwell else AUTO_DISMISS_MS_DEFAULT)
+    val effective = if (dwell > 0) dwell else AUTO_DISMISS_MS_DEFAULT
+    handler.postDelayed(autoDismiss, effective)
+    startCountdown((effective / 1000L).toInt())
+  }
+
+  // 사장님 정책 (v54 2026-05-24): 자동 종료 카운트다운 표시. "팝업창은 N초 후에
+  // 자동 종료 됩니다." (일반 사용자 facing 라 "모달" 대신 "팝업창"). bind() 가
+  // placeholder → data 두 번 호출돼도 매번 fresh reset.
+  private var countdownRunnable: Runnable? = null
+
+  private fun startCountdown(totalSec: Int) {
+    stopCountdown()
+    val view = findViewById<TextView>(R.id.overlay_dismiss_countdown) ?: return
+    view.visibility = View.VISIBLE
+    var remaining = totalSec
+    val runnable = object : Runnable {
+      override fun run() {
+        if (remaining <= 0) return
+        view.text = "팝업창은 ${remaining}초 후에 자동 종료 됩니다."
+        remaining--
+        handler.postDelayed(this, 1000)
+      }
+    }
+    countdownRunnable = runnable
+    handler.post(runnable)
+  }
+
+  private fun stopCountdown() {
+    countdownRunnable?.let { handler.removeCallbacks(it) }
+    countdownRunnable = null
   }
 
   private fun openReview(

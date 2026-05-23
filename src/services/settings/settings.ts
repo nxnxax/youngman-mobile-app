@@ -23,7 +23,7 @@ export interface AppSettings {
   incomingCallPopupEnabled: boolean;
   /** Heads-up 유지 시간 (초). 시스템 OEM 이 heads-up visible 자체는 5초쯤
    *  강제하지만, setTimeoutAfter 로 drawer notification 자체 lifetime 을 제어. */
-  incomingCallPopupDurationSec: 5 | 10 | 15;
+  incomingCallPopupDurationSec: 5 | 10 | 15 | 20;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -33,7 +33,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   keywords: '사장님, 사모님',
   realtimeDetection: true,
   incomingCallPopupEnabled: true,
-  incomingCallPopupDurationSec: 10,
+  incomingCallPopupDurationSec: 20,
 };
 
 interface NativeSettingsBridge {

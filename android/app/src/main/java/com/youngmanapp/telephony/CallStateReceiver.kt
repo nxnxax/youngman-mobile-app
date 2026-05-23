@@ -7,6 +7,7 @@ import android.telephony.TelephonyManager
 import android.util.Log
 import android.provider.Settings
 import androidx.core.content.ContextCompat
+import com.youngmanapp.auth.AuthStore
 import com.youngmanapp.overlay.CallPostActivity
 import com.youngmanapp.overlay.IncomingCallNotifier
 import com.youngmanapp.overlay.ModalController
@@ -54,6 +55,13 @@ class CallStateReceiver : BroadcastReceiver() {
         previous == TelephonyManager.EXTRA_STATE_OFFHOOK) {
       if (!SettingsStore.read(context).realtimeDetection) {
         Log.d(TAG, "call ended but realtime detection is OFF — skipping")
+        return
+      }
+      // 사장님 정책 (v51 2026-05-23): 로그아웃 상태에선 통화 후 모달 / 요약
+      // 기능 작동 안 함. JWT 없으면 PostCallScanService / 모달 / 자동 업로드
+      // 모두 skip. 로그인 안 한 사용자에게 영맨 UI 노출 X.
+      if (AuthStore.readJwt(context).isNullOrEmpty()) {
+        Log.d(TAG, "call ended but user is logged out — skipping modal/upload")
         return
       }
       Log.d(TAG, "call ended (OFFHOOK -> IDLE), starting scan + placeholder modal")

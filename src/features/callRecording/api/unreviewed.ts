@@ -149,11 +149,21 @@ export async function discardUnreviewed(jobId: string): Promise<void> {
 
 /** 사장님 정책 (2026-05-21): 사용자가 "요약보기" 누를 때 server 가 STT
  *  발동. 캐시 있으면 즉시 ok=true 반환 (30초 안). 처리 길어지면 processing=true
- *  반환 → caller 가 5초 후 summary_status polling. */
-export async function triggerSummarize(jobId: string): Promise<UnreviewedDetail> {
+ *  반환 → caller 가 5초 후 summary_status polling.
+ *
+ *  사장님 정책 (v43 2026-05-23 spec 변경 #1): auto_confirm 파라미터 추가.
+ *    - false (default): 기존 흐름 — callback 도착 시 ready_to_review.
+ *    - true: callback 도착 시 영맨이 자동 customer_log INSERT + send_to_group
+ *      → status='saved'. 사용자 검토 없이 바로 고객관리대장 들어감.
+ *    "양식에 전송" 모달 click 시 true. "요약보기" 흐름은 false. */
+export async function triggerSummarize(
+  jobId: string,
+  options?: { autoConfirm?: boolean },
+): Promise<UnreviewedDetail> {
   return apiPost<UnreviewedDetail>('/records.php?resource=customer-log', {
     action: 'trigger_summarize',
     job_id: jobId,
+    auto_confirm: options?.autoConfirm ?? false,
   });
 }
 

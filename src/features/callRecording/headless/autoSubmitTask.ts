@@ -15,8 +15,9 @@ import {
 } from '../../../services/outbox/outboxStore';
 import { hideProgressOverlay } from '../../../services/overlay/progressOverlay';
 import { deterministicRequestId } from '../../../shared/uuid';
-import { processRecording } from '../api/processRecording';
-import { fetchLedgerGroups, sendCustomerLogToGroup } from '../api/records';
+import { processRecordingAudioPending } from '../api/processRecording';
+import { fetchLedgerGroups } from '../api/records';
+import { triggerSummarize } from '../api/unreviewed';
 import { uploadRecording } from '../api/uploadRecording';
 import { extractPhoneNumber } from '../scanner/heuristics';
 
@@ -318,21 +319,14 @@ export async function autoSubmitTask(
     });
     await outboxUpdate(localId, { status: 'uploaded' });
 
-    // Async path: server returns job_id immediately, processes STT+LLM in
-    // the background, and fan-outs the final result via FCM
-    // `recording.processed`. We hand the job off to WebViewHost via
-    // AsyncStorage so the FloatingProcessingCard can pick it up the next
-    // time the app is foregrounded. Group assignment is handled
-    // server-side using `client_request_id` + group_id passed up here.
-    // 사장님 정책 (2026-05-21 비상 fix, 사장님 직접 제안): "1번 흐름 (모달 →
-    // 요약보기 → 양식전송) 이 잘 되면 똑같은 chain 을 백그라운드로 돌려라."
-    // SummaryReviewScreen 의 흐름과 100% 동일:
-    //   1) processRecording (sync mode) → customer_log row 받음
-    //   2) sendCustomerLogToGroup → ledger_records 에 그룹 mirror
-    // 옛 processRecordingAsync (audio_pending 흐름) 은 미확인요약 시스템 폐기로
-    // sendCustomerLogToGroup 까지 가지 못해 사장님 화면에 데이터 안 보임. sync
-    // 흐름은 7-30초 server 처리 동안 headless task 가 wait — 사용자 UI 안 막힘.
-    const result = await processRecording({
+    // 사장님 정책 (v43 2026-05-23 spec 변경 #1 — auto_confirm): 영맨 backend 가
+    // trigger_summarize 의 auto_confirm=true 받으면 callback 도착 시 자동으로
+    // customer_log INSERT + send_to_group 처리. native 는 polling/confirm 불필요.
+    // 흐름 단순화 (3단계 → 2단계):
+    //   1) processRecording (audio_pending + job_id, recording_jobs.group_id 저장)
+    //   2) trigger_summarize(auto_confirm=true) — 영맨에 위임
+    // 완료 알림은 FCM 으로 사장님에게 도달. native 는 task 즉시 종료.
+    const processed = await processRecordingAudioPending({
       storage_path: uploaded.storage_path,
       duration_sec: durationSec,
       original_filename: data.name,
@@ -340,51 +334,43 @@ export async function autoSubmitTask(
       phone_number: phoneNumber,
       client_request_id: localId,
       customer_name_hint: contactName,
+      group_id: resolvedGroupId,
     });
+    const jobId = processed.job_id;
 
     await outboxUpdate(localId, {
       status: 'processing',
-      serverJobId: result.customer_log.id,
+      serverJobId: jobId,
     });
     try {
       await AsyncStorage.removeItem(PENDING_JOB_KEY);
     } catch {}
 
-    // 2단계: ledger 그룹 mirror. SummaryReview 의 onSave 와 동일 호출.
-    // 실패 시 customer_log 는 이미 INSERT 됐고 ledger mirror 만 빠짐 →
-    // outboxProcessor 다음 사이클 retry 또는 사장님이 수동으로 그룹 보내기.
-    try {
-      logError(
-        'AutoSubmit.groupTrace',
-        new Error(
-          `sendCustomerLogToGroup call: customerLogId=${result.customer_log.id} ` +
-            `group_id=${JSON.stringify(resolvedGroupId)}`,
-        ),
-      );
-      await sendCustomerLogToGroup({
-        id: result.customer_log.id,
-        group_id: resolvedGroupId,
-      });
-      await outboxUpdate(localId, { status: 'saved' });
-    } catch (mirrorErr) {
-      logError('AutoSubmit.sendCustomerLogToGroup', mirrorErr, {
-        customerLogId: result.customer_log.id,
-        groupId: resolvedGroupId,
-      });
-      // customer_log 자체는 server 에 들어감 — failed_retryable 보다는
-      // ready_to_review 로 마킹해 사장님이 화면에서 수동 그룹 전송 가능.
+    // 사장님 정책 (v44 2026-05-23 영맨 긴급): 모달 자동 dismiss (pendingReview=true)
+    // 케이스는 trigger_summarize 호출 X. processRecording 만 호출해서 audio_pending
+    // 상태로 미확인 요약에 자동 보관. 사용자가 미확인 요약 페이지에서 나중에
+    // 명시적으로 trigger.
+    if (data.pendingReview) {
       await outboxUpdate(localId, { status: 'ready_to_review' });
-    }
-
-    hideProgressOverlay();
-
-    if (__DEV__) {
-      console.log(
-        '[AutoSubmit] customer_log saved',
-        result.customer_log.id,
-        '→ group',
-        resolvedGroupId,
-      );
+      hideProgressOverlay();
+      if (__DEV__) {
+        console.log(
+          '[AutoSubmit] audio_pending 보관 (자동 dismiss) job=',
+          jobId,
+          '— trigger_summarize skip',
+        );
+      }
+    } else {
+      await triggerSummarize(jobId, { autoConfirm: true });
+      await outboxUpdate(localId, { status: 'processing' });
+      hideProgressOverlay();
+      if (__DEV__) {
+        console.log(
+          '[AutoSubmit] trigger_summarize(auto_confirm=true) sent job=',
+          jobId,
+          '— 영맨 자동 confirm + FCM 알림',
+        );
+      }
     }
   } catch (e) {
     hideProgressOverlay();

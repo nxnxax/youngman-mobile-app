@@ -253,6 +253,19 @@
                             android:background="@drawable/group_list_bg" />
                     </ScrollView>
                 </LinearLayout>
+
+                <!-- 사장님 정책 (v54 2026-05-24): 모달 자동 종료 카운트다운.
+                     일반 사용자에게 "모달" 표현 X — "팝업창" 으로 표시. 매 초
+                     remaining 갱신. 위치 = 그룹 chip 아래 + 버튼 row 위. -->
+                <TextView
+                    android:id="@+id/overlay_dismiss_countdown"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:gravity="center"
+                    android:textColor="#111111"
+                    android:textSize="13sp"
+                    android:letterSpacing="-0.01" />
             </LinearLayout>
 
             <View
@@ -282,6 +295,10 @@
                     android:layout_height="match_parent"
                     android:background="#E5E5E5" />
 
+                <!-- 사장님 정책 (v42 2026-05-23): "양식에 전송" 버튼 부활.
+                     A 방식 — 한 번 누르면 자동으로 STT + confirm 까지 진행
+                     (사용자 무개입). autoSubmitTask 가 trigger_summarize → polling
+                     → confirm 자동 처리. -->
                 <TextView
                     android:id="@+id/overlay_btn_review"
                     android:layout_width="0dp"

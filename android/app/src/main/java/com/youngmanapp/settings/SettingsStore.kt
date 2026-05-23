@@ -37,7 +37,7 @@ object SettingsStore {
           keywords = "사장님, 사모님",
           realtimeDetection = true,
           incomingCallPopupEnabled = true,
-          incomingCallPopupDurationSec = 10,
+          incomingCallPopupDurationSec = 20,
       )
 
   fun write(ctx: Context, json: String) {

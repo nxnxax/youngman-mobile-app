@@ -83,7 +83,7 @@ android {
         applicationId "com.youngmanapp"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 38
+        versionCode 54
         versionName "1.0"
     }
     signingConfigs {
